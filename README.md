@@ -168,10 +168,21 @@ src/
   domain/            Money, Wallet, WagerTransaction, WalletLedgerEntry, Inbox/Outbox, eventos, hash canônico
   application/       use cases + portas (UnitOfWork, repositórios, Clock, IdGenerator, Metrics, ProviderIdentity)
   infrastructure/
-    persistence/     MikroORM, migrations, repositórios SQL, unit of work, outbox store
+    persistence/     MikroORM (EntitySchemas + LockMode), migrations, repositórios, unit of work, outbox, retenção
     messaging/       consumer SQS, outbox publisher, workers periódicos
     observability/   logger JSON (pino), métricas (prom-client)
-  http/              controllers, mapeamento de erros → HTTP, health, guard de auth (no-op)
+  http/              controllers, OpenAPI/Swagger, mapeamento de erros → HTTP, health, guard de auth (no-op)
 test/
   unit/ integration/ concurrency/ load/ support/
+scripts/
+  showcase.ts        processo completo (Docker, testes, demo, logs, tour do Swagger)
+  swagger.ts         sobe infra + API e abre o Swagger
+  swagger-tour.ts    executa todas as operações no Swagger UI (Chrome ou Edge)
+  demo.ts            cenários do desafio contra a API
+docs/
+  DATABASE.md        diagrama do banco, garantias e consultas
+  schema.sql         schema completo (pg_dump)
+.github/workflows/   CI: typecheck, unidade, integração e concorrência
 ```
+
+Pré-requisitos: Docker (Compose v2) e Bun ≥ 1.2. O `swagger:tour` usa o Chrome (ou o Edge) já instalado.
