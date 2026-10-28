@@ -11,6 +11,15 @@ Serviço financeiro que processa transações de apostas (`BET → WIN | LOSS | 
 
 ---
 
+## Rodar o desafio inteiro com 1 comando
+
+```bash
+bun install
+bun run tudo
+```
+
+Sobe o Docker Compose (PostgreSQL, LocalStack e **3 instâncias** da aplicação, esperando cada uma ficar saudável), roda o typecheck e os testes de unidade, integração e concorrência, faz a demonstração dos cenários nas instâncias do Docker, mostra os logs e as métricas, imprime um resumo por etapa (cada uma com a seção do enunciado que prova) e abre o **Swagger UI** em `http://localhost:3001/docs`, com as caixas já editáveis e preenchidas, seguindo os logs das 3 instâncias ao vivo. Flags: `--rapido` (pula a concorrência) e `--sem-testes`.
+
 ## Ver funcionando em 1 minuto
 
 ```bash
@@ -62,6 +71,7 @@ DB_PORT=5433 PORT=3000 bun run start
 
 | comando | o que faz |
 |---|---|
+| `bun run tudo` | o processo completo: Docker com 3 instâncias, todos os testes, demonstração, logs e Swagger |
 | `bun run swagger` | sobe a infra, as migrations e a API, e abre o Swagger |
 | `bun run demo` | demonstração dos cenários do desafio contra a API rodando |
 | `bun run start` | sobe uma instância |
