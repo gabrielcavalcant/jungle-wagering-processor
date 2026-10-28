@@ -66,7 +66,9 @@ describe('PostgreSQL temporarily unavailable', () => {
       // HTTP: a clear, retryable infrastructure failure — not a business rejection.
       const started = performance.now();
       const res = await submit(app.url, wager(w, 'outage-http', 'BET', '10.00'));
-      expect(res.status).toBe(503);
+      if (res.status !== 503) {
+        throw new Error(`expected 503, got ${res.status} ${JSON.stringify(res.body)}\n--- instance logs ---\n${app.logs.join('').slice(-4000)}`);
+      }
       expect(res.body.error.code).toBe('TRANSIENT_INFRASTRUCTURE_ERROR');
       expect(res.body.error.retryable).toBe(true);
       expect(performance.now() - started).toBeLessThan(15_000); // fails fast, does not hang
