@@ -5,6 +5,7 @@ Serviço financeiro que processa transações de apostas (`BET → WIN | LOSS | 
 **Stack:** Bun 1.x · TypeScript estrito · NestJS 11 · PostgreSQL 16 · MikroORM 6 · AWS SQS via LocalStack · Docker Compose.
 
 > Decisões, trade-offs e limitações estão em **[ARCHITECTURE.md](ARCHITECTURE.md)**.
+> Banco de dados (diagrama, garantias e SQL): **[docs/DATABASE.md](docs/DATABASE.md)** · **[docs/schema.sql](docs/schema.sql)**.
 
 ---
 
