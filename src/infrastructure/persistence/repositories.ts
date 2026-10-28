@@ -1,3 +1,4 @@
+import { LockMode } from '@mikro-orm/core';
 import type { EntityManager } from '@mikro-orm/postgresql';
 import {
   ConcurrencyConflictError,
@@ -19,15 +20,22 @@ import type { OutboxMessage } from '../../domain/outbox-message';
 import { WagerTransaction, type WagerTransactionKind, WagerTransactionStatus } from '../../domain/wager-transaction';
 import { Wallet } from '../../domain/wallet';
 import { constraintOf, isUniqueViolation } from './db-errors';
+import { LedgerEntryRecord, WagerTransactionRecord, WalletRecord } from './entities';
 
 type Row = Record<string, any>;
 
 /**
- * Money mapping: numeric(20,2) columns come back from `pg` as decimal strings ("975.00") and go
- * in as strings — no JS number is ever involved. Currency lives in its own char(3) column.
+ * Money mapping: numeric(20,2) columns come back as decimal strings ("975.00") and go in as
+ * strings — no JS number is ever involved. Currency lives in its own char(3) column.
  */
 const money = (amount: string, currency: string): Money => Money.parse({ amount, currency: currency.trim() });
 const date = (v: unknown): Date | undefined => (v == null ? undefined : v instanceof Date ? v : new Date(String(v)));
+
+/**
+ * Reads never go through the identity map: inside one SQL transaction the same row is read
+ * before and after taking the wallet lock, and the second read must see the latest commit.
+ */
+const FRESH = { disableIdentityMap: true } as const;
 
 async function all(em: EntityManager, sql: string, params: unknown[] = []): Promise<Row[]> {
   return (await em.execute(sql, params, 'all')) as Row[];
@@ -40,33 +48,37 @@ async function run(em: EntityManager, sql: string, params: unknown[] = []): Prom
 
 // ---------------------------------------------------------------------------- wallets
 
-function toWallet(r: Row): Wallet {
-  const currency = String(r.currency).trim();
+function toWallet(r: WalletRecord): Wallet {
+  const currency = r.currency.trim();
   return Wallet.rehydrate({
     id: r.id,
-    playerId: r.player_id,
+    playerId: r.playerId,
     currency,
     balance: money(r.balance, currency),
     version: Number(r.version),
-    createdAt: date(r.created_at)!,
-    updatedAt: date(r.updated_at)!,
+    createdAt: date(r.createdAt)!,
+    updatedAt: date(r.updatedAt)!,
   });
 }
 
 export class SqlWalletRepository implements WalletRepository {
   constructor(private readonly em: EntityManager) {}
 
+  /** SELECT … FOR UPDATE (or FOR UPDATE SKIP LOCKED) through MikroORM's LockMode. */
   async lockById(walletId: string, options?: { skipLocked?: boolean }): Promise<Wallet | undefined> {
     if (!isUuid(walletId)) return undefined;
-    const suffix = options?.skipLocked ? 'for update skip locked' : 'for update';
-    const rows = await all(this.em, `select * from wallets where id = ? ${suffix}`, [walletId]);
-    return rows[0] ? toWallet(rows[0]) : undefined;
+    const record = await this.em.findOne(
+      WalletRecord,
+      { id: walletId },
+      { lockMode: options?.skipLocked ? LockMode.PESSIMISTIC_PARTIAL_WRITE : LockMode.PESSIMISTIC_WRITE, refresh: true },
+    );
+    return record ? toWallet(record) : undefined;
   }
 
   async findById(walletId: string): Promise<Wallet | undefined> {
     if (!isUuid(walletId)) return undefined;
-    const rows = await all(this.em, 'select * from wallets where id = ?', [walletId]);
-    return rows[0] ? toWallet(rows[0]) : undefined;
+    const record = await this.em.findOne(WalletRecord, { id: walletId }, FRESH);
+    return record ? toWallet(record) : undefined;
   }
 
   async insert(wallet: Wallet): Promise<void> {
@@ -98,65 +110,59 @@ export class SqlWalletRepository implements WalletRepository {
 
 // ---------------------------------------------------------------------------- wager_transactions
 
-function toTransaction(r: Row): WagerTransaction {
-  const currency = String(r.currency).trim();
+function toTransaction(r: WagerTransactionRecord): WagerTransaction {
+  const currency = r.currency.trim();
   return WagerTransaction.rehydrate({
     id: r.id,
-    providerId: r.provider_id,
-    externalTransactionId: r.external_transaction_id,
-    idempotencyKey: r.idempotency_key,
-    payloadHash: String(r.payload_hash).trim(),
-    walletId: r.wallet_id,
-    playerId: r.player_id,
-    roundId: r.round_id,
-    gameId: r.game_id,
+    providerId: r.providerId,
+    externalTransactionId: r.externalTransactionId,
+    idempotencyKey: r.idempotencyKey,
+    payloadHash: r.payloadHash.trim(),
+    walletId: r.walletId,
+    playerId: r.playerId,
+    roundId: r.roundId,
+    gameId: r.gameId,
     kind: r.kind as WagerTransactionKind,
     money: money(r.amount, currency),
-    referenceExternalTransactionId: r.reference_external_transaction_id ?? undefined,
-    createdAt: date(r.created_at)!,
+    referenceExternalTransactionId: r.referenceExternalTransactionId ?? undefined,
+    createdAt: date(r.createdAt)!,
     status: r.status as WagerTransactionStatus,
-    referenceTransactionId: r.reference_transaction_id ?? undefined,
-    failureCode: (r.failure_code ?? undefined) as FailureCode | undefined,
-    processedAt: date(r.processed_at),
-    // result_balance is in the wallet currency; on CURRENCY_MISMATCH rejections it is read with the wallet's.
-    resultBalance: r.result_balance != null ? money(r.result_balance, String(r.wallet_currency ?? currency).trim()) : undefined,
-    referenceAttempts: Number(r.reference_attempts),
-    nextReferenceCheckAt: date(r.next_reference_check_at),
+    referenceTransactionId: r.referenceTransactionId ?? undefined,
+    failureCode: (r.failureCode ?? undefined) as FailureCode | undefined,
+    processedAt: date(r.processedAt),
+    // result_balance is in the wallet currency (differs from `currency` on CURRENCY_MISMATCH rejections).
+    resultBalance: r.resultBalance != null ? money(r.resultBalance, r.resultCurrency ?? currency) : undefined,
+    referenceAttempts: Number(r.referenceAttempts),
+    nextReferenceCheckAt: date(r.nextReferenceCheckAt),
   });
 }
-
-const TX_SELECT = `select t.*, w.currency as wallet_currency from wager_transactions t join wallets w on w.id = t.wallet_id`;
 
 export class SqlWagerTransactionRepository implements WagerTransactionRepository {
   constructor(private readonly em: EntityManager) {}
 
   async findById(id: string): Promise<WagerTransaction | undefined> {
     if (!isUuid(id)) return undefined;
-    const rows = await all(this.em, `${TX_SELECT} where t.id = ?`, [id]);
-    return rows[0] ? toTransaction(rows[0]) : undefined;
+    const r = await this.em.findOne(WagerTransactionRecord, { id }, FRESH);
+    return r ? toTransaction(r) : undefined;
   }
 
   async findByIdempotencyKey(key: string): Promise<WagerTransaction | undefined> {
-    const rows = await all(this.em, `${TX_SELECT} where t.idempotency_key = ?`, [key]);
-    return rows[0] ? toTransaction(rows[0]) : undefined;
+    const r = await this.em.findOne(WagerTransactionRecord, { idempotencyKey: key }, FRESH);
+    return r ? toTransaction(r) : undefined;
   }
 
   async findByExternalId(providerId: string, externalTransactionId: string): Promise<WagerTransaction | undefined> {
-    const rows = await all(this.em, `${TX_SELECT} where t.provider_id = ? and t.external_transaction_id = ?`, [
-      providerId,
-      externalTransactionId,
-    ]);
-    return rows[0] ? toTransaction(rows[0]) : undefined;
+    const r = await this.em.findOne(WagerTransactionRecord, { providerId, externalTransactionId }, FRESH);
+    return r ? toTransaction(r) : undefined;
   }
 
   async hasProcessedReversal(referenceId: string): Promise<boolean> {
-    const rows = await all(
-      this.em,
-      `select 1 from wager_transactions
-        where reference_transaction_id = ? and status = 'PROCESSED' and kind in ('REFUND','ROLLBACK') limit 1`,
-      [referenceId],
-    );
-    return rows.length > 0;
+    const n = await this.em.count(WagerTransactionRecord, {
+      referenceTransactionId: referenceId,
+      status: WagerTransactionStatus.Processed,
+      kind: { $in: ['REFUND', 'ROLLBACK'] },
+    });
+    return n > 0;
   }
 
   async insert(tx: WagerTransaction): Promise<void> {
@@ -166,14 +172,15 @@ export class SqlWagerTransactionRepository implements WagerTransactionRepository
         `insert into wager_transactions (
            id, provider_id, external_transaction_id, idempotency_key, payload_hash, wallet_id, player_id,
            round_id, game_id, kind, amount, currency, reference_external_transaction_id, reference_transaction_id,
-           status, failure_code, result_balance, reference_attempts, next_reference_check_at, processed_at,
+           status, failure_code, result_balance, result_currency, reference_attempts, next_reference_check_at, processed_at,
            created_at, updated_at)
-         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           tx.id, tx.providerId, tx.externalTransactionId, tx.idempotencyKey, tx.payloadHash, tx.walletId, tx.playerId,
           tx.roundId, tx.gameId, tx.kind, tx.money.amount, tx.money.currency, tx.referenceExternalTransactionId ?? null,
           tx.referenceTransactionId ?? null, tx.status, tx.failureCode ?? null, tx.resultBalance?.amount ?? null,
-          tx.referenceAttempts, tx.nextReferenceCheckAt ?? null, tx.processedAt ?? null, tx.createdAt, new Date(),
+          tx.resultBalance?.currency ?? null, tx.referenceAttempts, tx.nextReferenceCheckAt ?? null, tx.processedAt ?? null,
+          tx.createdAt, new Date(),
         ],
       );
     } catch (error) {
@@ -187,12 +194,12 @@ export class SqlWagerTransactionRepository implements WagerTransactionRepository
       await run(
         this.em,
         `update wager_transactions
-            set status = ?, failure_code = ?, result_balance = ?, reference_transaction_id = ?,
+            set status = ?, failure_code = ?, result_balance = ?, result_currency = ?, reference_transaction_id = ?,
                 reference_attempts = ?, next_reference_check_at = ?, processed_at = ?, updated_at = now()
           where id = ?`,
         [
-          tx.status, tx.failureCode ?? null, tx.resultBalance?.amount ?? null, tx.referenceTransactionId ?? null,
-          tx.referenceAttempts, tx.nextReferenceCheckAt ?? null, tx.processedAt ?? null, tx.id,
+          tx.status, tx.failureCode ?? null, tx.resultBalance?.amount ?? null, tx.resultBalance?.currency ?? null,
+          tx.referenceTransactionId ?? null, tx.referenceAttempts, tx.nextReferenceCheckAt ?? null, tx.processedAt ?? null, tx.id,
         ],
       );
     } catch (error) {
@@ -203,14 +210,12 @@ export class SqlWagerTransactionRepository implements WagerTransactionRepository
   }
 
   async findDuePendingReferences(now: Date, limit: number): Promise<Array<{ id: string; walletId: string }>> {
-    const rows = await all(
-      this.em,
-      `select id, wallet_id from wager_transactions
-        where status = 'PENDING_REFERENCE' and next_reference_check_at <= ?
-        order by next_reference_check_at limit ?`,
-      [now, limit],
+    const rows = await this.em.find(
+      WagerTransactionRecord,
+      { status: WagerTransactionStatus.PendingReference, nextReferenceCheckAt: { $lte: now } },
+      { ...FRESH, fields: ['id', 'walletId'], orderBy: { nextReferenceCheckAt: 'asc' }, limit },
     );
-    return rows.map((r) => ({ id: r.id, walletId: r.wallet_id }));
+    return rows.map((r) => ({ id: r.id, walletId: r.walletId }));
   }
 
   async expediteDependents(walletId: string, providerId: string, externalTransactionId: string, now: Date): Promise<number> {
@@ -231,17 +236,17 @@ export class SqlWagerTransactionRepository implements WagerTransactionRepository
 
 // ---------------------------------------------------------------------------- ledger
 
-function toEntry(r: Row): WalletLedgerEntry {
-  const currency = String(r.currency).trim();
+function toEntry(r: LedgerEntryRecord): WalletLedgerEntry {
+  const currency = r.currency.trim();
   return WalletLedgerEntry.rehydrate({
     id: r.id,
-    walletId: r.wallet_id,
-    transactionId: r.transaction_id,
+    walletId: r.walletId,
+    transactionId: r.transactionId,
     direction: r.direction as LedgerDirection,
     money: money(r.amount, currency),
-    balanceBefore: money(r.balance_before, currency),
-    balanceAfter: money(r.balance_after, currency),
-    createdAt: date(r.created_at)!,
+    balanceBefore: money(r.balanceBefore, currency),
+    balanceAfter: money(r.balanceAfter, currency),
+    createdAt: date(r.createdAt)!,
     sequence: Number(r.sequence),
   });
 }
@@ -260,15 +265,15 @@ export class SqlLedgerRepository implements LedgerRepository {
   }
 
   async findByTransactionId(transactionId: string): Promise<WalletLedgerEntry | undefined> {
-    const rows = await all(this.em, 'select * from wallet_ledger_entries where transaction_id = ? limit 1', [transactionId]);
-    return rows[0] ? toEntry(rows[0]) : undefined;
+    const r = await this.em.findOne(LedgerEntryRecord, { transactionId }, FRESH);
+    return r ? toEntry(r) : undefined;
   }
 
   async page(walletId: string, afterSequence: number | undefined, limit: number): Promise<WalletLedgerEntry[]> {
-    const rows = await all(
-      this.em,
-      `select * from wallet_ledger_entries where wallet_id = ? and sequence > ? order by sequence asc limit ?`,
-      [walletId, afterSequence ?? 0, limit],
+    const rows = await this.em.find(
+      LedgerEntryRecord,
+      { walletId, sequence: { $gt: String(afterSequence ?? 0) } },
+      { ...FRESH, orderBy: { sequence: 'asc' }, limit },
     );
     return rows.map(toEntry);
   }
