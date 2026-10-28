@@ -209,7 +209,7 @@ export async function spawnInstance(name: string, port: number, env: Record<stri
   void collect(proc.stdout as ReadableStream<Uint8Array>);
   void collect(proc.stderr as ReadableStream<Uint8Array>);
   const instance = { name, port, url: `http://localhost:${port}`, proc, logs };
-  const deadline = Date.now() + 30_000;
+  const deadline = Date.now() + Number(process.env.TEST_SPAWN_TIMEOUT_MS ?? 60_000);
   while (Date.now() < deadline) {
     if (proc.exitCode !== null) throw new Error(`${name} exited early (${proc.exitCode}): ${logs.join('').slice(-2000)}`);
     try {

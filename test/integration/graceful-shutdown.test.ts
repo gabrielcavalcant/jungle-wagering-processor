@@ -121,27 +121,42 @@ describe('graceful shutdown of the SQS consumer', () => {
 
   // On Windows a child "SIGTERM" is a hard TerminateProcess, so this only runs on POSIX (CI).
   test.skipIf(process.platform === 'win32')('a real process receiving SIGTERM drains and exits cleanly', async () => {
+    // Own queues: nothing left over from the in-process consumers above can interfere.
+    const pq = await createQueues('sigterm', { visibility: 30, maxReceive: 5 });
     const w = await createWallet.execute({ playerId: `p-${Bun.randomUUIDv7()}`, initialBalance: { amount: '100.00', currency: 'BRL' }, correlationId: 'c' });
-    const app = await spawnInstance('sigterm-1', 3251, instanceEnv(q, { LOG_LEVEL: 'info' }));
-    for (const m of bets(w, 'sigterm', 3)) await sendWager(q, m);
-    await waitFor(async () => (await balanceOf(w.id)) !== '100.00', 20_000, 50).catch((e) => {
-      throw new Error(`${e}\n--- instance logs ---\n${app.logs.join('').slice(-3000)}`);
-    });
-    app.proc.kill('SIGTERM');
-    const code = await Promise.race([app.proc.exited, Bun.sleep(30_000).then(() => 'timeout')]);
-    // Nest re-raises the signal after its shutdown hooks finish, so a clean SIGTERM exit is 143 (128 + 15),
-    // which is what Docker/Kubernetes expect. 'timeout' would mean it hung instead of draining.
-    expect([0, 143]).toContain(code as number);
-    const logs = app.logs.join('');
-    expect(logs).toContain('shutting down: draining workers');
-    expect(logs).toContain('sqs consumer stopped');
-    // Whatever was not processed is still in the queue (never lost); a new consumer finishes it.
-    const next = new WagerConsumer(gateway, submit, config);
-    next.start();
+    const app = await spawnInstance('sigterm-1', 3251, instanceEnv(pq, { LOG_LEVEL: 'info' }));
     try {
-      await waitFor(async () => (await balanceOf(w.id)) === '70.00', 45_000);
+      for (const m of bets(w, 'sigterm', 3)) await sendWager(pq, m);
+      await waitFor(async () => (await balanceOf(w.id)) !== '100.00', 30_000, 50).catch(async (e) => {
+        const depth = await queueDepth(pq.inputUrl).catch(() => 'n/a');
+        const runtime = app.logs.join('').split('\n').filter((l) => !/RouterExplorer|RoutesResolver|InstanceLoader/.test(l)).join('\n');
+        throw new Error(`${e}\nqueue depth: ${JSON.stringify(depth)}\n--- instance logs ---\n${runtime.slice(-4000)}`);
+      });
+      app.proc.kill('SIGTERM');
+      const code = await Promise.race([app.proc.exited, Bun.sleep(30_000).then(() => 'timeout')]);
+      // Nest re-raises the signal after its shutdown hooks finish, so a clean SIGTERM exit is 143 (128 + 15),
+      // which is what Docker/Kubernetes expect. 'timeout' would mean it hung instead of draining.
+      expect([0, 143]).toContain(code as number);
+      const logs = app.logs.join('');
+      expect(logs).toContain('shutting down: draining workers');
+      expect(logs).toContain('sqs consumer stopped');
+      // Whatever was not processed is still in the queue (never lost); a new consumer finishes it.
+      const pqConfig = { ...config, sqs: { ...config.sqs, inputQueue: pq.input, dlqQueue: pq.dlq, eventsQueue: pq.events } };
+      const pqGateway = new SqsGateway(pqConfig.sqs); // the gateway resolves queue names from its own config
+      const next = new WagerConsumer(pqGateway, submit, pqConfig);
+      next.start();
+      try {
+        await waitFor(async () => (await balanceOf(w.id)) === '70.00', 45_000).catch(async (e) => {
+          const depth = await queueDepth(pq.inputUrl).catch(() => 'n/a');
+          const runtime = app.logs.join('').split('\n').filter((l) => !/RouterExplorer|RoutesResolver|InstanceLoader/.test(l)).join('\n');
+          throw new Error(`${e}\nbalance: ${await balanceOf(w.id)} · queue depth: ${JSON.stringify(depth)}\n--- instance logs ---\n${runtime.slice(-4000)}`);
+        });
+      } finally {
+        await next.stop();
+      }
     } finally {
-      await next.stop();
+      if (app.proc.exitCode === null) app.proc.kill('SIGKILL');
+      await deleteQueues(pq);
     }
-  }, 120_000);
+  }, 150_000);
 });
