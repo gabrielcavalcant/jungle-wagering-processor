@@ -19,6 +19,8 @@ export const DB = {
   dbName: process.env.TEST_DB_NAME ?? 'wagering_test',
   poolMax: 10,
   lockTimeoutMs: 5000,
+  connectTimeoutMs: 3000,
+  acquireTimeoutMs: 10000,
   statementTimeoutMs: 15000,
 };
 const SQS_ENDPOINT = process.env.TEST_SQS_ENDPOINT ?? 'http://localhost:4566';

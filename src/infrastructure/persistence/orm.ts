@@ -18,7 +18,15 @@ export async function createOrm(db: AppConfig['db']): Promise<MikroORM> {
     user: db.user,
     password: db.password,
     dbName: db.dbName,
-    pool: { min: 1, max: db.poolMax },
+    // Fail fast instead of queueing forever when the pool is exhausted or the DB is unreachable.
+    pool: { min: 1, max: db.poolMax, acquireTimeoutMillis: db.acquireTimeoutMs },
+    driverOptions: {
+      connection: {
+        connectionTimeoutMillis: db.connectTimeoutMs,
+        // Client-side guard for a frozen/partitioned server, where server-side statement_timeout cannot fire.
+        query_timeout: db.statementTimeoutMs + 5_000,
+      },
+    },
     // EntitySchemas are used for reads and pessimistic locks; critical writes use explicit SQL
     // (see ARCHITECTURE.md §Persistence).
     entities: ENTITIES,

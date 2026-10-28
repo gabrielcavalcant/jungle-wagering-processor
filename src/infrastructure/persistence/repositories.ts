@@ -20,6 +20,7 @@ import type { OutboxMessage } from '../../domain/outbox-message';
 import { WagerTransaction, type WagerTransactionKind, WagerTransactionStatus } from '../../domain/wager-transaction';
 import { Wallet } from '../../domain/wallet';
 import { constraintOf, isUniqueViolation } from './db-errors';
+import { walletLockWait } from '../observability/metrics';
 import { LedgerEntryRecord, WagerTransactionRecord, WalletRecord } from './entities';
 
 type Row = Record<string, any>;
@@ -67,11 +68,13 @@ export class SqlWalletRepository implements WalletRepository {
   /** SELECT … FOR UPDATE (or FOR UPDATE SKIP LOCKED) through MikroORM's LockMode. */
   async lockById(walletId: string, options?: { skipLocked?: boolean }): Promise<Wallet | undefined> {
     if (!isUuid(walletId)) return undefined;
+    const started = performance.now();
     const record = await this.em.findOne(
       WalletRecord,
       { id: walletId },
       { lockMode: options?.skipLocked ? LockMode.PESSIMISTIC_PARTIAL_WRITE : LockMode.PESSIMISTIC_WRITE, refresh: true },
     );
+    walletLockWait.observe({ mode: options?.skipLocked ? 'skip_locked' : 'wait' }, (performance.now() - started) / 1000);
     return record ? toWallet(record) : undefined;
   }
 

@@ -23,7 +23,7 @@ const retries = new Counter({
   labelNames: ['operation', 'reason'] as const,
   registers: [registry],
 });
-const lockConflicts = new Counter({
+export const lockConflicts = new Counter({
   name: 'wagering_lock_conflicts_total',
   help: 'Lock contention events (version mismatch, lock timeout, skip-locked busy wallet)',
   labelNames: ['reason'] as const,
@@ -34,6 +34,17 @@ const latency = new Histogram({
   help: 'End-to-end processing latency of a wager transaction (including retries)',
   labelNames: ['source'] as const,
   buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10],
+  registers: [registry],
+});
+/**
+ * With pessimistic locking, contention shows up as *waiting*, not as errors: this histogram is
+ * the real "lock conflict" signal (how long each writer queued for its wallet row).
+ */
+export const walletLockWait = new Histogram({
+  name: 'wagering_wallet_lock_wait_seconds',
+  help: 'Time spent waiting for the wallet row lock (SELECT ... FOR UPDATE)',
+  labelNames: ['mode'] as const,
+  buckets: [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5],
   registers: [registry],
 });
 const divergences = new Counter({

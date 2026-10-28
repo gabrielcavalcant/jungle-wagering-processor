@@ -4,7 +4,13 @@ import { SubmitWagerTransactionUseCase } from '../../src/application/submit-wage
 import { TransactionProcessor } from '../../src/application/transaction-processor';
 import { CreateWalletUseCase } from '../../src/application/wallet.usecases';
 import { loadConfig } from '../../src/config';
+import { TransientInfrastructureError } from '../../src/application/errors';
+import { lockConflicts, walletLockWait } from '../../src/infrastructure/observability/metrics';
 import { RetentionStore } from '../../src/infrastructure/persistence/retention';
+
+async function counterValue(reason: string): Promise<number> {
+  return (await lockConflicts.get()).values.find((v) => v.labels.reason === reason)?.value ?? 0;
+}
 import { MikroOrmUnitOfWork } from '../../src/infrastructure/persistence/unit-of-work';
 import { noopMetrics } from '../support/in-memory';
 import { DB, assertGlobalInvariants, closeOrm, orm, resetDatabase, sql } from '../support/env';
@@ -113,6 +119,33 @@ describe('MikroORM LockMode on the wallet row', () => {
     release();
     await Promise.all([holder, waiter]);
     expect(acquiredAt).toBeGreaterThanOrEqual(releasedAt);
+
+    // The wait is visible in the lock-wait histogram (> 250 ms bucket), which is how contention
+    // shows up with pessimistic locking.
+    const values = (await walletLockWait.get()).values;
+    const count = values.find((v) => v.metricName === 'wagering_wallet_lock_wait_seconds_count' && v.labels.mode === 'wait')!.value;
+    const fast = values.find((v) => v.metricName === 'wagering_wallet_lock_wait_seconds_bucket' && v.labels.mode === 'wait' && (v.labels as Record<string, unknown>).le === 0.25)!.value;
+    expect(count - fast).toBeGreaterThanOrEqual(1);
+  });
+
+  test('lock_timeout surfaces as a transient error and is counted as a lock conflict', async () => {
+    const w = await newWallet();
+    const shortUow = new MikroOrmUnitOfWork(await orm(), { ...DB, lockTimeoutMs: 200 });
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    let locked!: () => void;
+    const isLocked = new Promise<void>((r) => (locked = r));
+    const holder = uow.run(async (ctx) => {
+      await ctx.wallets.lockById(w.walletId);
+      locked();
+      await held;
+    });
+    await isLocked;
+    const before = await counterValue('lock_timeout');
+    await expect(shortUow.run((ctx) => ctx.wallets.lockById(w.walletId))).rejects.toBeInstanceOf(TransientInfrastructureError);
+    expect(await counterValue('lock_timeout')).toBe(before + 1);
+    release();
+    await holder;
   });
 });
 

@@ -28,6 +28,8 @@ export function loadConfig() {
       /** lock_timeout per transaction: a stuck lock becomes a transient error instead of hanging forever. */
       lockTimeoutMs: int('DB_LOCK_TIMEOUT_MS', 5_000),
       statementTimeoutMs: int('DB_STATEMENT_TIMEOUT_MS', 15_000),
+      connectTimeoutMs: int('DB_CONNECT_TIMEOUT_MS', 3_000),
+      acquireTimeoutMs: int('DB_ACQUIRE_TIMEOUT_MS', 10_000),
     },
     sqs: {
       endpoint: process.env.SQS_ENDPOINT ?? 'http://localhost:4566',

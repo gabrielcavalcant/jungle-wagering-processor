@@ -1,4 +1,5 @@
 import { TransientInfrastructureError } from '../../application/errors';
+import { lockConflicts } from '../observability/metrics';
 
 interface PgLikeError {
   code?: string;
@@ -10,6 +11,9 @@ interface PgLikeError {
 /** SQLSTATEs that mean "try again": deadlock, serialization, lock/statement timeout, connection loss, shutdown. */
 const TRANSIENT_SQLSTATES = new Set(['40001', '40P01', '55P03', '57014', '57P01', '57P02', '57P03', '53300', '08000', '08003', '08006', '08001', '08004']);
 const TRANSIENT_NODE_CODES = new Set(['ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'EPIPE', 'ENOTFOUND', 'EAI_AGAIN']);
+
+/** Lock contention that surfaced as an error (counted in wagering_lock_conflicts_total). */
+const LOCK_REASONS: Record<string, string> = { '55P03': 'lock_timeout', '40P01': 'deadlock', '40001': 'serialization_failure' };
 
 export function isUniqueViolation(error: unknown, constraint?: string): boolean {
   const e = error as PgLikeError;
@@ -25,7 +29,7 @@ export function isTransientDbError(error: unknown): boolean {
   for (let depth = 0; current && depth < 4; depth++) {
     const e = current as PgLikeError;
     if (e.code && (TRANSIENT_SQLSTATES.has(e.code) || TRANSIENT_NODE_CODES.has(e.code))) return true;
-    if (typeof e.message === 'string' && /connection terminated|timeout acquiring a connection|Connection lost|connect ECONNREFUSED|Knex: Timeout/i.test(e.message)) {
+    if (typeof e.message === 'string' && /connection terminated|timeout acquiring a connection|Connection lost|connect ECONNREFUSED|Knex: Timeout|Query read timeout|timeout exceeded when trying to connect|Connection terminated unexpectedly/i.test(e.message)) {
       return true;
     }
     current = e.cause;
@@ -38,6 +42,8 @@ export function translateDbError(error: unknown): unknown {
   if (error instanceof TransientInfrastructureError) return error;
   if (isTransientDbError(error)) {
     const code = (error as PgLikeError).code ?? 'unknown';
+    const reason = LOCK_REASONS[code];
+    if (reason) lockConflicts.inc({ reason });
     return new TransientInfrastructureError(`Database temporarily unavailable (${code})`, error);
   }
   return error;
