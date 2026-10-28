@@ -23,7 +23,7 @@ export const DB = {
   acquireTimeoutMs: 10000,
   statementTimeoutMs: 15000,
 };
-const SQS_ENDPOINT = process.env.TEST_SQS_ENDPOINT ?? 'http://localhost:4566';
+export const SQS_ENDPOINT = process.env.TEST_SQS_ENDPOINT ?? 'http://localhost:4566';
 
 export const sqs = new SQSClient({ endpoint: SQS_ENDPOINT, region: 'us-east-1', credentials: { accessKeyId: 'test', secretAccessKey: 'test' } });
 

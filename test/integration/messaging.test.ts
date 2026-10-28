@@ -13,6 +13,7 @@ import { MikroOrmUnitOfWork } from '../../src/infrastructure/persistence/unit-of
 import { noopMetrics } from '../support/in-memory';
 import {
   DB,
+  SQS_ENDPOINT,
   type TestQueues,
   assertGlobalInvariants,
   closeOrm,
@@ -43,7 +44,7 @@ beforeAll(async () => {
   config.instanceId = 'test-publisher';
   config.sqs = {
     ...config.sqs,
-    endpoint: 'http://localhost:4566',
+    endpoint: SQS_ENDPOINT,
     inputQueue: q.input,
     dlqQueue: q.dlq,
     eventsQueue: q.events,

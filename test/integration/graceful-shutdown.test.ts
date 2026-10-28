@@ -9,6 +9,7 @@ import { MikroOrmUnitOfWork } from '../../src/infrastructure/persistence/unit-of
 import { noopMetrics } from '../support/in-memory';
 import {
   DB,
+  SQS_ENDPOINT,
   type TestQueues,
   assertGlobalInvariants,
   closeOrm,
@@ -44,7 +45,7 @@ beforeAll(async () => {
   q = await createQueues('shutdown', { visibility: 30, maxReceive: 5 });
   config = loadConfig();
   config.sqs = {
-    ...config.sqs, endpoint: 'http://localhost:4566', inputQueue: q.input, dlqQueue: q.dlq, eventsQueue: q.events,
+    ...config.sqs, endpoint: SQS_ENDPOINT, inputQueue: q.input, dlqQueue: q.dlq, eventsQueue: q.events,
     consumerName: 'shutdown-consumer', waitTimeSec: 1, visibilityTimeoutSec: 30, batchSize: 10,
   };
   gateway = new SqsGateway(config.sqs);
@@ -123,10 +124,14 @@ describe('graceful shutdown of the SQS consumer', () => {
     const w = await createWallet.execute({ playerId: `p-${Bun.randomUUIDv7()}`, initialBalance: { amount: '100.00', currency: 'BRL' }, correlationId: 'c' });
     const app = await spawnInstance('sigterm-1', 3251, instanceEnv(q, { LOG_LEVEL: 'info' }));
     for (const m of bets(w, 'sigterm', 3)) await sendWager(q, m);
-    await waitFor(async () => (await balanceOf(w.id)) !== '100.00', 20_000, 50);
+    await waitFor(async () => (await balanceOf(w.id)) !== '100.00', 20_000, 50).catch((e) => {
+      throw new Error(`${e}\n--- instance logs ---\n${app.logs.join('').slice(-3000)}`);
+    });
     app.proc.kill('SIGTERM');
     const code = await Promise.race([app.proc.exited, Bun.sleep(30_000).then(() => 'timeout')]);
-    expect(code).toBe(0);
+    // Nest re-raises the signal after its shutdown hooks finish, so a clean SIGTERM exit is 143 (128 + 15),
+    // which is what Docker/Kubernetes expect. 'timeout' would mean it hung instead of draining.
+    expect([0, 143]).toContain(code as number);
     const logs = app.logs.join('');
     expect(logs).toContain('shutting down: draining workers');
     expect(logs).toContain('sqs consumer stopped');
