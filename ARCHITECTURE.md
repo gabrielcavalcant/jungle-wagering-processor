@@ -208,11 +208,14 @@ Migrations (em `src/infrastructure/persistence/migrations/`, todas com `down()`,
 | `wagering_duplicates_detected_total{kind}` | `idempotency_replay`, `inbox_message`, `idempotency_conflict` |
 | `wagering_retries_total{operation,reason}` | retries do use case, do worker de referências |
 | `wagering_sqs_dlq_messages_total{reason}` / `wagering_sqs_messages_total{outcome}` | DLQ e desfecho das mensagens |
-| `wagering_lock_conflicts_total{reason}` | version mismatch, wallet ocupada (SKIP LOCKED) |
+| `wagering_wallet_lock_wait_seconds{mode}` | **quanto tempo cada escrita esperou o lock da wallet**: com lock pessimista, contenção aparece como espera, não como erro, então este é o sinal real de conflito |
+| `wagering_lock_conflicts_total{reason}` | contenção que virou erro: `lock_timeout`, `deadlock`, `serialization_failure`, version mismatch, wallet ocupada (SKIP LOCKED) |
 | `wagering_outbox_lag_seconds`, `wagering_outbox_pending` | outbox lag |
 | `wagering_processing_latency_seconds{source}` | latência de processamento |
 | `wagering_reconciliation_divergences_total` | divergências (com log `RECONCILIATION_DIVERGENCE`) |
 
+- **Timeouts no cliente do banco:** `connectionTimeoutMillis`, `acquireTimeoutMillis` do pool e `query_timeout` no driver `pg`. Se o servidor congelar (partição de rede), o `statement_timeout` do lado do servidor não dispara; sem esses limites a requisição ficaria pendurada.
+- **Swagger / OpenAPI:** `/docs` (UI interativa) e `/docs/openapi.json`, com cada código HTTP e o seu significado documentados.
 - **Health:** `/health/live` (processo vivo) e `/health/ready` (`select 1` no PostgreSQL + `GetQueueAttributes` no SQS, com timeout de 2 s cada; 503 durante o shutdown). Ambos sem autenticação.
 
 ## 10. Testes e teste de carga
@@ -221,7 +224,10 @@ Migrations (em `src/infrastructure/persistence/migrations/`, todas com `down()`,
 |---|---|---|
 | unidade (73) | `test/unit` | `Money` (escala, inválidos, arredondamento nunca silencioso), invariantes da `Wallet`, todas as regras por kind, conflito de moeda, payload divergente, máquina de estados, hash canônico |
 | integração (29) | `test/integration` | migrations up/down; **cada constraint do schema testada com SQL direto**; atomicidade (falha na outbox desfaz tx + wallet + ledger + inbox); inbox + redelivery; crash antes do ack; DLQ permanente; retry + DLQ por `maxReceiveCount` com transação `FAILED`; 3 publishers concorrentes **mantendo a ordem por wallet**; cabeça com falha bloqueando o resto do fluxo; lease expirada; publicação com falha; retenção (só apaga o que pode, em lotes, concorrente); `LockMode` bloqueando / pulando |
-| concorrência (9) | `test/concurrency` | **3 processos reais**: 50 duplicatas → 1 débito; 100/80/80 ×10; 20 wallets em paralelo; carga mista HTTP+SQS em wallets quentes; outbox com 3 publishers; REFUND/ROLLBACK antes da referência (HTTP e SQS); referência que nunca chega; **processo morto entre o commit e o ack** (`FAULT_INJECTION`, exit 137); **SIGKILL nas 3 instâncias no meio da carga + restart** |
+| concorrência (10) | `test/concurrency` | **3 processos reais**: 50 duplicatas → 1 débito; 100/80/80 ×10; 20 wallets em paralelo; carga mista HTTP+SQS em wallets quentes; outbox com 3 publishers; REFUND/ROLLBACK antes da referência (HTTP e SQS); referência que nunca chega; **processo morto entre o commit e o ack** (`FAULT_INJECTION`, exit 137); **SIGKILL nas 3 instâncias no meio da carga + restart**; **queda real do PostgreSQL** (container parado com tráfego HTTP + SQS: 503 rápido, readiness 503, mensagens sem ir para a DLQ e, ao voltar, cada efeito aplicado exatamente uma vez) |
+| shutdown (2) | `test/integration/graceful-shutdown` | SIGTERM: a mensagem em andamento termina e é confirmada, as não iniciadas voltam para a fila na hora; processo real recebendo SIGTERM drena e sai (só em POSIX/CI, porque no Windows o sinal mata na hora) |
+
+**CI:** GitHub Actions (`.github/workflows/ci.yml`) roda typecheck + unidade e, com PostgreSQL e LocalStack via Docker Compose, integração e concorrência a cada push.
 
 Todos terminam verificando `wallet.balance == Σ ledger` (+ encadeamento, + nenhuma entrada duplicada).
 

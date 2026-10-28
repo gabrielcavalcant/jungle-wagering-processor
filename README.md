@@ -1,5 +1,7 @@
 # Distributed Wagering Processor
 
+[![CI](https://github.com/gabrielcavalcant/jungle-wagering-processor/actions/workflows/ci.yml/badge.svg)](https://github.com/gabrielcavalcant/jungle-wagering-processor/actions/workflows/ci.yml)
+
 Serviço financeiro que processa transações de apostas (`BET → WIN | LOSS | REFUND | ROLLBACK`) vindas de múltiplos provedores, por **HTTP** e **SQS**. Ele continua correto com mensagens duplicadas, entregues fora de ordem ou processadas ao mesmo tempo por **N instâncias**.
 
 **Stack:** Bun 1.x · TypeScript estrito · NestJS 11 · PostgreSQL 16 · MikroORM 6 · AWS SQS via LocalStack · Docker Compose.
@@ -51,7 +53,7 @@ DB_PORT=5433 PORT=3000 bun run start
 | `bun run test:unit` | domínio e regras de negócio (sem I/O, ~1 s) |
 | `bun run test:integration` | PostgreSQL + LocalStack reais: constraints, atomicidade, inbox, outbox ordenada, retry, DLQ + `FAILED`, retenção, locks |
 | `bun run test:concurrency` | **3 processos reais** da aplicação: 50 duplicatas em paralelo, corrida de saldo, crash após commit, kill de todas as instâncias + restart |
-| `bun run test:all` | tudo: 111 testes (~90 s) |
+| `bun run test:all` | tudo: 116 testes |
 | `bun run test:load` | teste de carga → [`test/load/RESULTS.md`](test/load/RESULTS.md) |
 
 Os testes de integração e concorrência exigem `bun run infra:up`. Eles usam o banco `wagering_test` e criam **filas próprias por execução**, então não interferem no ambiente de dev. Nenhum teste substitui PostgreSQL ou SQS por mock. Os mocks em memória (`test/support/in-memory.ts`) servem só para os testes de unidade das regras.
