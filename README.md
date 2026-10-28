@@ -72,7 +72,7 @@ DB_PORT=5433 PORT=3000 bun run start
 | comando | o que faz |
 |---|---|
 | `bun run showcase` | o processo completo: Docker com 3 instâncias, todos os testes, demonstração, logs e Swagger |
-| `bun run swagger:tour` | abre o Swagger UI no Chrome (ou Edge) e executa **todas as operações** sozinho, devagar, com uma faixa explicando cada passo |
+| `bun run swagger:tour` | abre o Swagger UI no **navegador padrão do sistema** (Chrome, Edge ou Brave; senão Chrome/Edge) e executa **todas as operações** sozinho, devagar, com uma faixa explicando cada passo |
 | `bun run swagger` | sobe a infra, as migrations e a API, e abre o Swagger |
 | `bun run demo` | demonstração dos cenários do desafio contra a API rodando |
 | `bun run start` | sobe uma instância |
@@ -177,7 +177,7 @@ test/
 scripts/
   showcase.ts        processo completo (Docker, testes, demo, logs, tour do Swagger)
   swagger.ts         sobe infra + API e abre o Swagger
-  swagger-tour.ts    executa todas as operações no Swagger UI (Chrome ou Edge)
+  swagger-tour.ts    executa todas as operações no Swagger UI (navegador padrão)
   demo.ts            cenários do desafio contra a API
 docs/
   DATABASE.md        diagrama do banco, garantias e consultas
@@ -185,4 +185,4 @@ docs/
 .github/workflows/   CI: typecheck, unidade, integração e concorrência
 ```
 
-Pré-requisitos: Docker (Compose v2) e Bun ≥ 1.2. O `swagger:tour` usa o Chrome (ou o Edge) já instalado.
+Pré-requisitos: Docker (Compose v2) e Bun ≥ 1.2. O `swagger:tour` usa o navegador padrão já instalado, se for da família Chromium (Chrome, Edge, Brave); senão, Chrome ou Edge. `TOUR_BROWSER=chrome|msedge` força um deles.

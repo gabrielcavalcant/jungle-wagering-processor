@@ -3,9 +3,10 @@
  * operation: expands it, fills the boxes, clicks "Execute", reads the response and checks it.
  * A banner on top of the page says what each step proves.
  *
- * Uses the browser already installed (Chrome, or Edge) through playwright-core — nothing to download.
+ * Uses the OS default browser when it is Chromium-based (Chrome, Edge, Brave), else Chrome, then Edge —
+ * through playwright-core, nothing to download.
  * Env: API_URL (default http://localhost:3001), TOUR_SLOWMO_MS (default 900), TOUR_PACE (1 = calm, 0.3 = fast),
- *      TOUR_BROWSER (chrome|msedge; default tries Chrome, then Edge).
+ *      TOUR_BROWSER (chrome|msedge) to force one.
  */
 import { chromium, type Locator, type Page } from 'playwright-core';
 
@@ -20,16 +21,82 @@ const c = { green: '\x1b[32m', red: '\x1b[31m', cyan: '\x1b[36m', dim: '\x1b[2m'
 let passed = 0;
 let failed = 0;
 
+interface BrowserChoice {
+  label: string;
+  channel?: string;
+  executablePath?: string;
+}
+
+const BRAVE_PATHS = [
+  `${process.env.LOCALAPPDATA}\\BraveSoftware\\Brave-Browser\\Application\\brave.exe`,
+  'C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe',
+  '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser',
+  '/usr/bin/brave-browser',
+];
+
+function sh(cmd: string[]): string {
+  try {
+    const res = Bun.spawnSync(cmd, { stdout: 'pipe', stderr: 'ignore' });
+    return res.stdout.toString();
+  } catch {
+    return '';
+  }
+}
+
+/** The OS default web browser, when it is one Playwright can drive (Chromium family). */
+function defaultBrowser(): BrowserChoice | { unsupported: string } | undefined {
+  let id = '';
+  if (process.platform === 'win32') {
+    id = sh(['reg', 'query', 'HKCU\\Software\\Microsoft\\Windows\\Shell\\Associations\\UrlAssociations\\https\\UserChoice', '/v', 'ProgId']);
+  } else if (process.platform === 'darwin') {
+    const plist = sh(['defaults', 'read', `${process.env.HOME}/Library/Preferences/com.apple.LaunchServices/com.apple.launchservices.secure`]);
+    id = /LSHandlerRoleAll = "([^"]+)";\s*LSHandlerURLScheme = https/.exec(plist)?.[1] ?? '';
+  } else {
+    id = sh(['xdg-settings', 'get', 'default-web-browser']);
+  }
+  id = id.toLowerCase();
+  if (!id.trim()) return undefined;
+  if (/chrome/.test(id) && !/chromium/.test(id)) return { label: 'Google Chrome', channel: 'chrome' };
+  if (/msedge|edge/.test(id)) return { label: 'Microsoft Edge', channel: 'msedge' };
+  if (/brave/.test(id)) {
+    const path = BRAVE_PATHS.find((p) => Bun.file(p).size > 0);
+    return path ? { label: 'Brave', executablePath: path } : undefined;
+  }
+  if (/firefox/.test(id)) return { unsupported: 'Firefox' };
+  if (/safari/.test(id)) return { unsupported: 'Safari' };
+  return undefined;
+}
+
+/** TOUR_BROWSER > OS default browser > Chrome > Edge. */
 async function launch() {
-  const channels = process.env.TOUR_BROWSER ? [process.env.TOUR_BROWSER] : ['chrome', 'msedge'];
-  for (const channel of channels) {
+  const candidates: BrowserChoice[] = [];
+  if (process.env.TOUR_BROWSER) {
+    candidates.push({ label: `TOUR_BROWSER=${process.env.TOUR_BROWSER}`, channel: process.env.TOUR_BROWSER });
+  } else {
+    const detected = defaultBrowser();
+    if (detected && 'unsupported' in detected) {
+      console.log(`${c.dim}Navegador padrão é o ${detected.unsupported}, que a automação não controla; usando Chrome/Edge.${c.reset}`);
+    } else if (detected) {
+      candidates.push({ ...detected, label: `${detected.label} (navegador padrão do sistema)` });
+    }
+    candidates.push({ label: 'Google Chrome', channel: 'chrome' }, { label: 'Microsoft Edge', channel: 'msedge' });
+  }
+  for (const choice of candidates) {
     try {
-      return await chromium.launch({ channel, headless: false, slowMo: SLOWMO, args: ['--start-maximized'] });
+      const browser = await chromium.launch({
+        channel: choice.channel,
+        executablePath: choice.executablePath,
+        headless: false,
+        slowMo: SLOWMO,
+        args: ['--start-maximized'],
+      });
+      console.log(`${c.dim}Navegador: ${choice.label}${c.reset}`);
+      return browser;
     } catch {
-      /* try the next one */
+      /* not installed: try the next one */
     }
   }
-  throw new Error('Nenhum navegador encontrado (Edge ou Chrome). Defina TOUR_BROWSER=msedge|chrome.');
+  throw new Error('Nenhum navegador compatível encontrado (Chrome, Edge ou Brave). Defina TOUR_BROWSER=chrome|msedge.');
 }
 
 /** Banner fixed on top of Swagger UI narrating the current step. */
