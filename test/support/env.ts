@@ -120,12 +120,14 @@ export async function closeOrm() {
   sharedOrm = undefined;
 }
 
-/** Full migration down + up: proves reversibility and gives every test file a clean schema. */
+/**
+ * Clean schema for every test file: drop everything, then apply all migrations.
+ * (Reversibility — down to zero and up again — has its own test in schema-and-atomicity.)
+ */
 export async function resetDatabase(): Promise<void> {
   const o = await orm();
-  const migrator = o.getMigrator();
-  await migrator.down({ to: 0 });
-  await migrator.up();
+  await o.em.fork().execute('drop schema public cascade; create schema public;');
+  await o.getMigrator().up();
 }
 
 export async function sql<T = Record<string, any>>(query: string, params: unknown[] = []): Promise<T[]> {
