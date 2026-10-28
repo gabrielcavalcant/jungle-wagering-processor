@@ -15,10 +15,10 @@ Serviço financeiro que processa transações de apostas (`BET → WIN | LOSS | 
 
 ```bash
 bun install
-bun run tudo
+bun run showcase
 ```
 
-Sobe o Docker Compose (PostgreSQL, LocalStack e **3 instâncias** da aplicação, esperando cada uma ficar saudável), roda o typecheck e os testes de unidade, integração e concorrência, faz a demonstração dos cenários nas instâncias do Docker, mostra os logs e as métricas, imprime um resumo por etapa (cada uma com a seção do enunciado que prova) e abre o **Swagger UI** em `http://localhost:3001/docs`, com as caixas já editáveis e preenchidas, seguindo os logs das 3 instâncias ao vivo. Flags: `--rapido` (pula a concorrência) e `--sem-testes`.
+Sobe o Docker Compose (PostgreSQL, LocalStack e **3 instâncias** da aplicação, esperando cada uma ficar saudável), roda o typecheck e os testes de unidade, integração e concorrência, faz a demonstração dos cenários nas instâncias do Docker, mostra os logs e as métricas, imprime um resumo por etapa (cada uma com a seção do enunciado que prova) e, no fim, abre o **Swagger UI** no navegador e executa sozinho todas as operações (preenche as caixas, clica em Execute e confere cada resposta), enquanto os logs das 3 instâncias aparecem ao vivo. Flags: `--rapido` (pula a concorrência) e `--sem-testes`.
 
 ## Ver funcionando em 1 minuto
 
@@ -71,7 +71,8 @@ DB_PORT=5433 PORT=3000 bun run start
 
 | comando | o que faz |
 |---|---|
-| `bun run tudo` | o processo completo: Docker com 3 instâncias, todos os testes, demonstração, logs e Swagger |
+| `bun run showcase` | o processo completo: Docker com 3 instâncias, todos os testes, demonstração, logs e Swagger |
+| `bun run swagger:tour` | abre o Swagger UI no Chrome (ou Edge) e executa **todas as operações** sozinho, devagar, com uma faixa explicando cada passo |
 | `bun run swagger` | sobe a infra, as migrations e a API, e abre o Swagger |
 | `bun run demo` | demonstração dos cenários do desafio contra a API rodando |
 | `bun run start` | sobe uma instância |

@@ -1,5 +1,5 @@
 /**
- * `bun run tudo` — the whole challenge, end to end, in one command:
+ * `bun run showcase` — the whole challenge, end to end, in one command:
  *   1. Docker Compose: PostgreSQL + LocalStack + migrations + 3 app instances (waits until healthy)
  *   2. typecheck (TypeScript strict)
  *   3. unit tests · 4. integration tests · 5. concurrency tests (real PostgreSQL/SQS, real processes)
@@ -116,11 +116,12 @@ const failed = results.filter((r) => r.ok === false).length;
 console.log(`\n  ${failed ? `${c.red}${failed} etapa(s) falharam` : `${c.green}${c.bold}Tudo certo.`}${c.reset}`);
 
 banner(9, TOTAL, 'Swagger UI + logs ao vivo', '§9 API',
-  'O Swagger abre no navegador com as caixas já editáveis e preenchidas com exemplos. Abaixo, os logs das 3 instâncias em tempo real.');
+  'O navegador abre o Swagger UI e executa sozinho todas as operações (caixas preenchidas, Execute, resposta conferida). Abaixo, os logs das 3 instâncias em tempo real.');
 console.log(`  ${c.green}●${c.reset} Swagger:  ${c.bold}${API}/docs${c.reset}   (também em :3002 e :3003)`);
 console.log(`  ${c.green}●${c.reset} Health:   ${API}/health/ready`);
 console.log(`  ${c.green}●${c.reset} Métricas: ${API}/metrics`);
 console.log(`\n  ${c.dim}Ctrl+C para parar de acompanhar os logs (as instâncias continuam no ar; \`docker compose down\` derruba tudo).${c.reset}\n`);
-openBrowser(`${API}/docs`);
+// Drives Swagger UI in a visible browser through every operation (scripts/swagger-tour.ts); logs keep streaming below.
+Bun.spawn([bun, 'run', 'scripts/swagger-tour.ts'], { cwd: ROOT, env: { ...process.env, API_URL: API }, stdout: 'inherit', stderr: 'inherit' });
 await exec(['docker', 'compose', 'logs', '-f', '--tail', '0', 'app-1', 'app-2', 'app-3']);
 process.exit(failed ? 1 : 0);
