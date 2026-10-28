@@ -60,6 +60,15 @@ export function loadConfig() {
       maxDelayMs: int('PENDING_REFERENCE_MAX_DELAY_MS', 60_000),
       maxAttempts: int('PENDING_REFERENCE_MAX_ATTEMPTS', 10),
     },
+    retention: {
+      enabled: bool('RETENTION_ENABLED', true),
+      pollMs: int('RETENTION_POLL_MS', 60_000),
+      batchSize: int('RETENTION_BATCH_SIZE', 1_000),
+      /** Published outbox rows are kept this long (debugging / replays). */
+      outboxHours: int('OUTBOX_RETENTION_HOURS', 7 * 24),
+      /** Must exceed SQS max message retention (14 days) — otherwise a late redelivery could be re-applied. */
+      inboxHours: int('INBOX_RETENTION_HOURS', 15 * 24),
+    },
     authMode: (process.env.AUTH_MODE ?? 'none') as 'none' | 'static-token',
     /** Fault injection for crash tests ONLY. "after-commit-before-ack" kills the process at that point. */
     faultInjection: process.env.FAULT_INJECTION ?? '',
