@@ -80,7 +80,7 @@ DB_PORT=5433 PORT=3000 bun run start
 | `bun run test:unit` | domínio e regras de negócio (sem I/O, ~1 s) |
 | `bun run test:integration` | PostgreSQL + LocalStack reais: constraints, atomicidade, inbox, outbox ordenada, retry, DLQ + `FAILED`, retenção, locks |
 | `bun run test:concurrency` | **3 processos reais** da aplicação: 50 duplicatas em paralelo, corrida de saldo, crash após commit, kill de todas as instâncias + restart |
-| `bun run test:all` | tudo: 115 testes (no CI: ~2 min) |
+| `bun run test:all` | tudo: 133 testes (no CI: ~2 min) |
 | `bun run test:load` | teste de carga → [`test/load/RESULTS.md`](test/load/RESULTS.md) |
 
 Os testes de integração e concorrência exigem `bun run infra:up`. Eles usam o banco `wagering_test` e criam **filas próprias por execução**, então não interferem no ambiente de dev. Nenhum teste substitui PostgreSQL ou SQS por mock. Os mocks em memória (`test/support/in-memory.ts`) servem só para os testes de unidade das regras.
