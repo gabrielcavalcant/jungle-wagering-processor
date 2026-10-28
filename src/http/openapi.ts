@@ -44,7 +44,7 @@ export const openApiDocument: OpenAPIObject = {
     '/wallets': {
       post: {
         tags: ['Wallets'],
-        summary: 'Create a wallet',
+        summary: 'Create a wallet', operationId: 'createWallet',
         description: 'A positive initial balance creates an internal OPENING transaction and a CREDIT ledger entry in the same SQL transaction.',
         requestBody: {
           required: true,
@@ -61,7 +61,7 @@ export const openApiDocument: OpenAPIObject = {
     '/wallets/{walletId}': {
       get: {
         tags: ['Wallets'],
-        summary: 'Get a wallet (balance and version)',
+        summary: 'Get a wallet (balance and version)', operationId: 'getWallet',
         parameters: [{ $ref: '#/components/parameters/walletId' }],
         responses: { '200': { description: 'OK', content: json(ref('Wallet')) }, '404': error('Wallet not found', 'WALLET_NOT_FOUND') },
       },
@@ -69,7 +69,7 @@ export const openApiDocument: OpenAPIObject = {
     '/wallets/{walletId}/ledger': {
       get: {
         tags: ['Wallets'],
-        summary: 'Ledger entries (append-only), keyset-paginated',
+        summary: 'Ledger entries (append-only), keyset-paginated', operationId: 'getLedger',
         parameters: [
           { $ref: '#/components/parameters/walletId' },
           { name: 'cursor', in: 'query', required: false, schema: { type: 'string' }, description: 'Opaque cursor from `nextCursor`' },
@@ -85,7 +85,7 @@ export const openApiDocument: OpenAPIObject = {
     '/wallets/{walletId}/reconciliation': {
       post: {
         tags: ['Wallets'],
-        summary: 'Compare stored balance with the balance rebuilt from the ledger',
+        summary: 'Compare stored balance with the balance rebuilt from the ledger', operationId: 'reconcileWallet',
         description: 'Never corrects anything. A divergence is logged, counted in a metric and reported with `consistent: false`.',
         parameters: [{ $ref: '#/components/parameters/walletId' }],
         responses: { '200': { description: 'Report', content: json(ref('Reconciliation')) }, '404': error('Wallet not found', 'WALLET_NOT_FOUND') },
@@ -94,7 +94,7 @@ export const openApiDocument: OpenAPIObject = {
     '/wagering/transactions': {
       post: {
         tags: ['Wagering'],
-        summary: 'Submit a wager transaction',
+        summary: 'Submit a wager transaction', operationId: 'submitTransaction',
         parameters: [
           {
             name: 'Idempotency-Key',
@@ -147,7 +147,7 @@ export const openApiDocument: OpenAPIObject = {
     '/wagering/transactions/{transactionId}': {
       get: {
         tags: ['Wagering'],
-        summary: 'Get a transaction by internal id',
+        summary: 'Get a transaction by internal id', operationId: 'getTransaction',
         parameters: [{ name: 'transactionId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }],
         responses: { '200': { description: 'OK', content: json(ref('Transaction')) }, '404': error('Transaction not found', 'TRANSACTION_NOT_FOUND') },
       },
@@ -155,7 +155,7 @@ export const openApiDocument: OpenAPIObject = {
     '/providers/{providerId}/wagering/transactions/{externalTransactionId}': {
       get: {
         tags: ['Wagering'],
-        summary: "Get a transaction by the provider's id",
+        summary: "Get a transaction by the provider's id", operationId: 'getTransactionByExternalId',
         parameters: [
           { name: 'providerId', in: 'path', required: true, schema: { type: 'string' }, example: 'provider-a' },
           { name: 'externalTransactionId', in: 'path', required: true, schema: { type: 'string' }, example: 'transaction-123' },
@@ -164,12 +164,12 @@ export const openApiDocument: OpenAPIObject = {
       },
     },
     '/health/live': {
-      get: { tags: ['Operations'], summary: 'Liveness (process is up)', responses: { '200': { description: 'OK', content: json({ type: 'object' }, { status: 'ok' }) } } },
+      get: { tags: ['Operations'], summary: 'Liveness (process is up)', operationId: 'healthLive', responses: { '200': { description: 'OK', content: json({ type: 'object' }, { status: 'ok' }) } } },
     },
     '/health/ready': {
       get: {
         tags: ['Operations'],
-        summary: 'Readiness (PostgreSQL and SQS reachable)',
+        summary: 'Readiness (PostgreSQL and SQS reachable)', operationId: 'healthReady',
         responses: {
           '200': { description: 'Ready', content: json({ type: 'object' }, { status: 'ok', shuttingDown: false, checks: { postgres: { status: 'ok', latencyMs: 4 }, sqs: { status: 'ok', latencyMs: 12 } } }) },
           '503': { description: 'A dependency is down or the instance is shutting down' },
@@ -177,7 +177,7 @@ export const openApiDocument: OpenAPIObject = {
       },
     },
     '/metrics': {
-      get: { tags: ['Operations'], summary: 'Prometheus metrics', responses: { '200': { description: 'text/plain exposition format' } } },
+      get: { tags: ['Operations'], summary: 'Prometheus metrics', operationId: 'metrics', responses: { '200': { description: 'text/plain exposition format' } } },
     },
   },
   components: {
