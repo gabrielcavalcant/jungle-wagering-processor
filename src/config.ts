@@ -46,6 +46,7 @@ export function loadConfig() {
       waitTimeSec: int('SQS_WAIT_TIME_SEC', 10),
       batchSize: int('SQS_BATCH_SIZE', 10),
       retryBaseDelaySec: int('SQS_RETRY_BASE_DELAY_SEC', 2),
+      retryMaxDelaySec: int('SQS_RETRY_MAX_DELAY_SEC', 300),
     },
     workers: {
       consumerEnabled: bool('CONSUMER_ENABLED', true),

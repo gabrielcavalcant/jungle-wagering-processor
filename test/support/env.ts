@@ -181,6 +181,7 @@ export function instanceEnv(q: TestQueues, extra: Record<string, string> = {}): 
     SQS_VISIBILITY_TIMEOUT_SEC: '3',
     SQS_MAX_RECEIVE_COUNT: '3',
     SQS_RETRY_BASE_DELAY_SEC: '1',
+    SQS_RETRY_MAX_DELAY_SEC: '4',
     OUTBOX_POLL_MS: '200',
     PENDING_REFERENCE_POLL_MS: '200',
     PENDING_REFERENCE_BASE_DELAY_MS: '200',

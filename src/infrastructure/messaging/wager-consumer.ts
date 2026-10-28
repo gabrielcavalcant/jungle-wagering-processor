@@ -184,7 +184,7 @@ export class WagerConsumer {
         sqsMessages.inc({ outcome: 'dlq' });
       } else {
         const receiveCount = Number(message.Attributes?.ApproximateReceiveCount ?? '1');
-        const delay = Math.min(300, this.config.sqs.retryBaseDelaySec * 2 ** (receiveCount - 1));
+        const delay = Math.min(this.config.sqs.retryMaxDelaySec, this.config.sqs.retryBaseDelaySec * 2 ** (receiveCount - 1));
         await this.release(queueUrl, message, delay);
         sqsMessages.inc({ outcome: 'retry' });
       }
