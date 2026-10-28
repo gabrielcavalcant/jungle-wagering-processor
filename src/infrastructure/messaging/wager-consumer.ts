@@ -6,6 +6,7 @@ import {
   SendMessageCommand,
 } from '@aws-sdk/client-sqs';
 import { ExternalIdConflictError, IdempotencyConflictError, ProviderForbiddenError, WalletNotFoundError } from '../../application/errors';
+import type { RecordPermanentFailureUseCase } from '../../application/record-permanent-failure.usecase';
 import type { SubmitWagerTransactionUseCase } from '../../application/submit-wager-transaction.usecase';
 import type { AppConfig } from '../../config';
 import { ValidationError } from '../../domain/errors';
@@ -14,7 +15,7 @@ import type { WagerTransactionKind } from '../../domain/wager-transaction';
 import { logger } from '../observability/logger';
 import { dlqMessages, sqsMessages } from '../observability/metrics';
 import type { SqsGateway } from './sqs';
-import { wagerMessageSchema } from './wager-message.schema';
+import { type WagerMessage, wagerMessageSchema } from './wager-message.schema';
 
 /** How a message is settled. */
 export type Disposition =
@@ -40,6 +41,7 @@ export class WagerConsumer {
     private readonly sqs: SqsGateway,
     private readonly useCase: SubmitWagerTransactionUseCase,
     private readonly config: AppConfig,
+    private readonly failures?: RecordPermanentFailureUseCase,
   ) {}
 
   start(): void {
@@ -151,8 +153,22 @@ export class WagerConsumer {
         return { kind: 'dlq', reason: error.code.toLowerCase() };
       }
       logger.error({ ...log, err: errMessage(error), receiveCount }, 'transient message error');
-      if (receiveCount >= this.config.sqs.maxReceiveCount) return { kind: 'dlq', reason: 'max_receive_count' };
+      if (receiveCount >= this.config.sqs.maxReceiveCount) {
+        await this.recordFailure(data, correlationId, errMessage(error), log);
+        return { kind: 'dlq', reason: 'max_receive_count' };
+      }
       return { kind: 'retry', reason: (error as Error)?.constructor?.name ?? 'unknown' };
+    }
+  }
+
+  /** Retries exhausted on infrastructure errors: leave an auditable FAILED transaction (best effort). */
+  private async recordFailure(data: WagerMessage['data'], correlationId: string, reason: string, log: Record<string, unknown>) {
+    if (!this.failures) return;
+    try {
+      const tx = await this.failures.execute({ ...data, kind: data.kind as WagerTransactionKind, correlationId, source: 'sqs' }, reason.slice(0, 200));
+      if (tx) logger.warn({ ...log, transactionId: tx.id, status: tx.status }, 'transaction recorded as FAILED before DLQ');
+    } catch (error) {
+      logger.error({ ...log, err: errMessage(error) }, 'could not record FAILED transaction; DLQ message is the audit trail');
     }
   }
 

@@ -137,6 +137,24 @@ export class WagerTransactionRejected extends IntegrationEvent<WagerTransactionR
   }
 }
 
+export interface WagerTransactionFailedData extends TransactionEventBase {
+  failureCode: FailureCode;
+  reason: string;
+}
+
+export class WagerTransactionFailed extends IntegrationEvent<WagerTransactionFailedData> {
+  readonly eventType = 'WagerTransactionFailed';
+  readonly version = 1;
+
+  static from(tx: WagerTransaction, reason: string, ctx: EventContext): WagerTransactionFailed {
+    return new WagerTransactionFailed({
+      ...ctx,
+      aggregateId: tx.walletId,
+      data: { ...transactionData(tx), failureCode: tx.failureCode!, reason },
+    });
+  }
+}
+
 export interface WagerTransactionPendingReferenceData extends TransactionEventBase {
   attempt: number;
   nextCheckAt: string;

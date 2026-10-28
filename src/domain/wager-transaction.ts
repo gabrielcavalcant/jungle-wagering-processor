@@ -264,11 +264,13 @@ export class WagerTransaction {
     this._nextReferenceCheckAt = undefined;
   }
 
-  fail(code: FailureCode, at: Date): void {
+  /** Permanent infrastructure failure: terminal and auditable, never touches the balance. */
+  fail(code: FailureCode, at: Date, observedBalance?: Money): void {
     this.transitionTo(WagerTransactionStatus.Failed);
     this._failureCode = code;
     this._processedAt = at;
     this._nextReferenceCheckAt = undefined;
+    if (observedBalance) this._resultBalance = observedBalance;
   }
 
   // ---- domain queries

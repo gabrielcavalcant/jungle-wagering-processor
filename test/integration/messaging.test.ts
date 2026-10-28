@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { TransientInfrastructureError } from '../../src/application/errors';
+import { RecordPermanentFailureUseCase } from '../../src/application/record-permanent-failure.usecase';
 import { SubmitWagerTransactionUseCase } from '../../src/application/submit-wager-transaction.usecase';
 import { TransactionProcessor } from '../../src/application/transaction-processor';
 import { CreateWalletUseCase } from '../../src/application/wallet.usecases';
@@ -81,8 +82,8 @@ async function balanceOf(walletId: string) {
   return (await sql(`select balance::text as b from wallets where id = ?`, [walletId]))[0]!.b as string;
 }
 
-async function withConsumer<T>(useCase: SubmitWagerTransactionUseCase, fn: () => Promise<T>): Promise<T> {
-  const consumer = new WagerConsumer(gateway, useCase, config);
+async function withConsumer<T>(useCase: SubmitWagerTransactionUseCase, fn: () => Promise<T>, failures?: RecordPermanentFailureUseCase): Promise<T> {
+  const consumer = new WagerConsumer(gateway, useCase, config, failures);
   consumer.start();
   try {
     return await fn();
@@ -153,8 +154,18 @@ describe('SQS consumer + inbox', () => {
     } as unknown as SubmitWagerTransactionUseCase;
     const msg = wagerMessage(`m-${Bun.randomUUIDv7()}`, data(w, `ext-${Bun.randomUUIDv7()}`));
     await sendWager(q, msg);
-    await withConsumer(flaky, () => waitFor(async () => (await queueDepth(q.dlqUrl)).visible > 0, 30_000));
+    const recorder = new RecordPermanentFailureUseCase(new MikroOrmUnitOfWork(await orm(), DB), clock, ids, noopMetrics);
+    await withConsumer(flaky, () => waitFor(async () => (await queueDepth(q.dlqUrl)).visible > 0, 30_000), recorder);
     expect(calls).toBe(3);
+    // Auditable outcome: the transaction exists as FAILED, with no balance movement and a FAILED event.
+    const failed = await sql(`select id, status, failure_code, result_balance::text as rb from wager_transactions where idempotency_key = ?`, [msg.data.idempotencyKey]);
+    expect(failed[0]).toMatchObject({ status: 'FAILED', failure_code: 'PERMANENT_INFRASTRUCTURE_FAILURE', rb: '100.00' });
+    expect(await sql(`select 1 from wallet_ledger_entries where transaction_id = ?`, [failed[0]!.id])).toHaveLength(0);
+    expect(await sql(`select 1 from outbox_messages where event_type = 'WagerTransactionFailed' and payload->'data'->>'transactionId' = ?`, [failed[0]!.id])).toHaveLength(1);
+    // A later redelivery of the same request replays the FAILED outcome; it is never applied twice.
+    const replay = await submit.execute({ ...(msg.data as any), correlationId: 'c', source: 'http' });
+    expect(replay.idempotentReplay).toBe(true);
+    expect(replay.transaction.status).toBe('FAILED' as never);
     const dlq = await drain(q.dlqUrl);
     expect(dlq[0]!.attrs.dlqReason).toBe('max_receive_count');
     expect(dlq[0]!.body.messageId).toBe(msg.messageId);
