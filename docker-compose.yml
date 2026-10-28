@@ -19,6 +19,13 @@ x-app: &app
     PORT: 3000
   restart: unless-stopped
   stop_grace_period: 40s
+  # Ready = PostgreSQL and SQS reachable (GET /health/ready). Lets `docker compose up --wait` mean "serving".
+  healthcheck:
+    test: ["CMD", "bun", "-e", "fetch('http://localhost:3000/health/ready').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+    interval: 3s
+    timeout: 3s
+    retries: 40
+    start_period: 5s
 
 services:
   postgres:
