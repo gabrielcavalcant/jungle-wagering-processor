@@ -10,6 +10,8 @@ export interface OutboxMessageState {
   nextAttemptAt?: Date;
   publishedAt?: Date;
   lastError?: string;
+  /** Insertion order assigned by the database; defines the publish order per aggregate. */
+  sequence?: number;
 }
 
 export const OUTBOX_BASE_BACKOFF_MS = 500;
@@ -26,6 +28,7 @@ export class OutboxMessage {
     private _nextAttemptAt?: Date,
     private _publishedAt?: Date,
     private _lastError?: string,
+    public readonly sequence?: number,
   ) {}
 
   /** The outbox row id is the event id: a republished event keeps the same id, so consumers can dedup. */
@@ -52,6 +55,7 @@ export class OutboxMessage {
       state.nextAttemptAt,
       state.publishedAt,
       state.lastError,
+      state.sequence,
     );
   }
 

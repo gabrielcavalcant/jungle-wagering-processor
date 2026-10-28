@@ -3,11 +3,16 @@ import { OutboxMessage } from '../../domain/outbox-message';
 import { translateDbError } from './db-errors';
 
 /**
- * Lease-based claiming for concurrent publishers:
- *   1. short tx: pick due rows with FOR UPDATE SKIP LOCKED, stamp locked_by/locked_until, commit;
- *   2. publish outside any DB transaction (no row lock held during network I/O);
- *   3. mark published (guarded by locked_by) or schedule a retry.
- * If a publisher dies between 1 and 3, the lease expires and another instance claims the row.
+ * Lease-based claiming for concurrent publishers, **ordered per aggregate (wallet)**:
+ *   1. one statement: for each wallet, look at the *head* of its unpublished stream (lowest
+ *      sequence). A wallet is claimable only if its head is due and not leased, and only if
+ *      this statement wins `pg_try_advisory_xact_lock(wallet)` — so two publishers never take
+ *      events of the same wallet at the same time. The claimed rows get locked_by/locked_until;
+ *   2. publish outside any DB transaction (no row lock held during network I/O), per wallet in
+ *      sequence order, stopping that wallet at the first failure;
+ *   3. mark published (guarded by locked_by) or schedule a retry of the head, which blocks the
+ *      wallet's later events until it goes out — order is preserved.
+ * If a publisher dies between 1 and 3, the lease expires and another instance claims the rows.
  * Worst case is a duplicate publish — consumers dedup by eventId.
  */
 export class OutboxStore {
@@ -16,20 +21,32 @@ export class OutboxStore {
   async claim(publisherId: string, batchSize: number, leaseMs: number): Promise<OutboxMessage[]> {
     try {
       const rows = (await this.orm.em.fork().execute(
-        `with due as (
-           select id from outbox_messages
+        `with heads as (
+           select distinct on (aggregate_id) aggregate_id, next_attempt_at, locked_until
+             from outbox_messages
             where published_at is null
-              and next_attempt_at <= now()
+            order by aggregate_id, sequence
+         ),
+         ready as (
+           select aggregate_id from heads
+            where next_attempt_at <= now()
               and (locked_until is null or locked_until < now())
-            order by sequence
+              and pg_try_advisory_xact_lock(hashtextextended(aggregate_id::text, 7))
             limit ?
-            for update skip locked
+         ),
+         due as (
+           select o.id from outbox_messages o
+             join ready r on r.aggregate_id = o.aggregate_id
+            where o.published_at is null
+            order by o.sequence
+            limit ?
+            for update of o skip locked
          )
          update outbox_messages o
             set locked_by = ?, locked_until = now() + (? || ' milliseconds')::interval
            from due where o.id = due.id
          returning o.*`,
-        [batchSize, publisherId, String(leaseMs)],
+        [batchSize, batchSize, publisherId, String(leaseMs)],
         'all',
       )) as Array<Record<string, any>>;
       return rows
@@ -45,6 +62,7 @@ export class OutboxStore {
             nextAttemptAt: r.next_attempt_at ? new Date(r.next_attempt_at) : undefined,
             publishedAt: r.published_at ? new Date(r.published_at) : undefined,
             lastError: r.last_error ?? undefined,
+            sequence: Number(r.sequence),
           }),
         );
     } catch (error) {
@@ -80,6 +98,17 @@ export class OutboxStore {
       `update outbox_messages set attempts = ?, next_attempt_at = ?, last_error = ?, locked_by = null, locked_until = null
         where id = ? and published_at is null and locked_by = ?`,
       [message.attempts, message.nextAttemptAt ?? new Date(), message.lastError ?? null, message.id, publisherId],
+      'run',
+    );
+  }
+
+  /** Gives back claimed rows that were not attempted (a wallet stopped at an earlier failure). */
+  async release(publisherId: string, ids: string[]): Promise<void> {
+    if (ids.length === 0) return;
+    await this.orm.em.fork().execute(
+      `update outbox_messages set locked_by = null, locked_until = null
+        where id = any(?::uuid[]) and published_at is null and locked_by = ?`,
+      [`{${ids.join(',')}}`, publisherId],
       'run',
     );
   }

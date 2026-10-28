@@ -1,6 +1,7 @@
 import { SendMessageBatchCommand } from '@aws-sdk/client-sqs';
 import type { ProcessPendingReferencesUseCase } from '../../application/process-pending-references.usecase';
 import type { AppConfig } from '../../config';
+import type { OutboxMessage } from '../../domain/outbox-message';
 import type { OutboxStore } from '../persistence/outbox-store';
 import { logger } from '../observability/logger';
 import { outboxFailures, outboxLag, outboxPending, outboxPublished } from '../observability/metrics';
@@ -42,10 +43,12 @@ export class PeriodicWorker {
 }
 
 /**
- * Publishes committed outbox rows to wagering-events.fifo. Many instances can run it at once:
- * rows are leased with SKIP LOCKED, so each row has one active publisher at a time; a crashed
- * publisher's lease expires and the row is picked up again (at-least-once). Events are sent with
- * MessageDeduplicationId = eventId and carry eventId in the body for consumer-side dedup.
+ * Publishes committed outbox rows to wagering-events.fifo. Many instances can run it at once.
+ * Ordering: a claim hands a publisher whole per-wallet streams (see OutboxStore.claim); each
+ * stream is published in `sequence` order and stops at the first failure, so a wallet's
+ * events reach the queue in commit order. Different wallets are published in parallel.
+ * Delivery is at-least-once (crashed publisher → lease expires → republish); events carry
+ * MessageDeduplicationId = eventId and eventId/sequence attributes for consumer-side dedup.
  */
 export class OutboxPublisher {
   constructor(
@@ -57,10 +60,22 @@ export class OutboxPublisher {
   async publishOnce(): Promise<number> {
     const publisherId = this.config.instanceId;
     const batch = await this.store.claim(publisherId, this.config.workers.outboxBatchSize, this.config.workers.outboxLeaseMs);
+    const streams = new Map<string, OutboxMessage[]>();
+    for (const m of batch) streams.set(m.aggregateId, [...(streams.get(m.aggregateId) ?? []), m]);
+    const counts = await Promise.all([...streams.values()].map((stream) => this.publishStream(publisherId, stream)));
+    const { lag, pending } = await this.store.lagSeconds();
+    outboxLag.set(lag);
+    outboxPending.set(pending);
+    return counts.reduce((a, b) => a + b, 0);
+  }
+
+  /** One wallet's events, already sorted by sequence. Returns how many were marked published. */
+  private async publishStream(publisherId: string, stream: OutboxMessage[]): Promise<number> {
     let published = 0;
-    for (let i = 0; i < batch.length; i += 10) {
-      const chunk = batch.slice(i, i + 10);
+    for (let i = 0; i < stream.length; i += 10) {
+      const chunk = stream.slice(i, i + 10);
       const now = new Date();
+      let failed: Map<number, string>;
       try {
         const res = await this.sqs.client.send(
           new SendMessageBatchCommand({
@@ -73,38 +88,39 @@ export class OutboxPublisher {
               MessageAttributes: {
                 eventType: { DataType: 'String', StringValue: m.eventType },
                 eventId: { DataType: 'String', StringValue: m.id },
+                sequence: { DataType: 'Number', StringValue: String(m.sequence ?? 0) },
               },
             })),
           }),
         );
-        const failed = new Map((res.Failed ?? []).map((f) => [Number(f.Id), f.Message ?? f.Code ?? 'failed']));
-        const succeeded = chunk.filter((_, idx) => !failed.has(idx));
-        for (const [idx, m] of chunk.entries()) {
-          if (!failed.has(idx)) continue;
-          m.scheduleRetry(now, failed.get(idx));
-          await this.store.scheduleRetry(publisherId, m);
-          outboxFailures.inc();
-        }
-        succeeded.forEach((m) => m.markPublished(now));
-        const marked = await this.store.markPublishedMany(publisherId, succeeded.map((m) => m.id), now);
-        for (const m of succeeded) {
-          if (!marked.has(m.id)) continue; // lease lost meanwhile: someone else owns the row now
-          published++;
-          outboxPublished.inc({ event_type: m.eventType });
-        }
+        failed = new Map((res.Failed ?? []).map((f) => [Number(f.Id), f.Message ?? f.Code ?? 'failed']));
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        logger.warn({ err: message, count: chunk.length }, 'outbox publish failed; scheduling retry');
-        for (const m of chunk) {
-          m.scheduleRetry(now, message);
-          await this.store.scheduleRetry(publisherId, m).catch(() => undefined);
-          outboxFailures.inc();
-        }
+        logger.warn({ err: message, aggregateId: chunk[0]!.aggregateId, count: chunk.length }, 'outbox publish failed; scheduling retry');
+        failed = new Map(chunk.map((_, idx) => [idx, message]));
       }
+
+      // Whatever SQS accepted is on the queue: record it, even past a failed entry (it cannot be unsent).
+      const succeeded = chunk.filter((_, idx) => !failed.has(idx));
+      succeeded.forEach((m) => m.markPublished(now));
+      const marked = await this.store.markPublishedMany(publisherId, succeeded.map((m) => m.id), now);
+      for (const m of succeeded) {
+        if (!marked.has(m.id)) continue; // lease lost meanwhile: someone else owns the row now
+        published++;
+        outboxPublished.inc({ event_type: m.eventType });
+      }
+      if (failed.size === 0) continue;
+
+      // Failure: back off the failed rows; the wallet's stream waits behind its head until it goes out.
+      for (const [idx, reason] of failed) {
+        const m = chunk[idx]!;
+        m.scheduleRetry(now, reason);
+        await this.store.scheduleRetry(publisherId, m).catch(() => undefined);
+        outboxFailures.inc();
+      }
+      await this.store.release(publisherId, stream.slice(i + 10).map((m) => m.id)).catch(() => undefined);
+      break;
     }
-    const { lag, pending } = await this.store.lagSeconds();
-    outboxLag.set(lag);
-    outboxPending.set(pending);
     return published;
   }
 }

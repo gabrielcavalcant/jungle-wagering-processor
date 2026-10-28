@@ -178,31 +178,66 @@ describe('SQS consumer + inbox', () => {
 });
 
 describe('transactional outbox', () => {
-  test('two concurrent publishers drain the outbox without losing events', async () => {
-    const w = await newWallet('1000.00');
-    for (let i = 0; i < 30; i++) {
-      await submit.execute({ ...(data(w, `pub-${i}`, 'BET', '1.00') as any), correlationId: 'c', source: 'http' });
+  test('concurrent publishers drain the outbox without losing events and keep per-wallet order', async () => {
+    const wallets = await Promise.all(Array.from({ length: 6 }, () => newWallet('1000.00')));
+    // Interleave writes across wallets so every claim mixes several per-wallet streams.
+    for (let i = 0; i < 10; i++) {
+      for (const [wi, w] of wallets.entries()) {
+        await submit.execute({ ...(data(w, `pub-${wi}-${i}`, 'BET', '1.00') as any), correlationId: 'c', source: 'http' });
+      }
     }
     await drain(q.eventsUrl, 0); // clear anything left from earlier tests
     const store = new OutboxStore(await orm());
-    const pubA = new OutboxPublisher(store, gateway, { ...config, instanceId: 'pub-A' });
-    const pubB = new OutboxPublisher(store, gateway, { ...config, instanceId: 'pub-B' });
+    const small = { ...config.workers, outboxBatchSize: 8 };
+    const publishers = ['pub-A', 'pub-B', 'pub-C'].map((id) => new OutboxPublisher(store, gateway, { ...config, instanceId: id, workers: small }));
     const loop = async (p: OutboxPublisher) => {
       let total = 0;
-      for (let i = 0; i < 20; i++) total += await p.publishOnce();
+      for (let i = 0; i < 40; i++) total += await p.publishOnce();
       return total;
     };
-    const [a, b] = await Promise.all([loop(pubA), loop(pubB)]);
+    const counts = await Promise.all(publishers.map(loop));
+    console.log(`events published per publisher: ${counts.join(' / ')}`);
     const rows = await sql(`select count(*)::int as n from outbox_messages`);
-    expect(a + b).toBe(rows[0]!.n); // every row marked published exactly once
-    expect(a).toBeGreaterThan(0);
-    expect(b).toBeGreaterThan(0);
+    expect(counts.reduce((a, b) => a + b, 0)).toBe(rows[0]!.n); // every row marked published exactly once
+    expect(counts.filter((c) => c > 0).length).toBeGreaterThan(1); // the work really was shared
     expect(await sql(`select 1 from outbox_messages where published_at is null`)).toHaveLength(0);
+
     const received = await drain(q.eventsUrl);
     const unique = new Set(received.map((m) => m.body.eventId));
-    expect(unique.size).toBe(received.length); // FIFO dedup by eventId; consumers would dedup anyway
+    expect(unique.size).toBe(received.length);
     expect(received.every((m) => m.attrs.eventId === m.body.eventId && typeof m.body.version === 'number')).toBe(true);
-  }, 60_000);
+    // Per wallet, events arrive in commit order: outbox sequence and walletVersion strictly increase.
+    for (const w of wallets) {
+      const stream = received.filter((m) => m.body.aggregateId === w.walletId);
+      const seqs = stream.map((m) => Number(m.attrs.sequence));
+      expect(seqs).toEqual([...seqs].sort((a, b) => a - b));
+      const versions = stream.filter((m) => m.body.eventType === 'WalletBalanceChanged').map((m) => m.body.data.walletVersion);
+      expect(versions).toEqual([...versions].sort((a, b) => a - b));
+      expect(new Set(versions).size).toBe(versions.length);
+    }
+  }, 90_000);
+
+  test('a failed head blocks the rest of its wallet stream until it is published (order preserved)', async () => {
+    const w = await newWallet('100.00');
+    await submit.execute({ ...(data(w, 'head-1', 'BET', '1.00') as any), correlationId: 'c', source: 'http' });
+    await submit.execute({ ...(data(w, 'head-2', 'BET', '1.00') as any), correlationId: 'c', source: 'http' });
+    const store = new OutboxStore(await orm());
+    // Drain everything else first so only this wallet's stream is pending.
+    const ok = new OutboxPublisher(store, gateway, config);
+    await sql(`update outbox_messages set next_attempt_at = now() + interval '1 hour' where aggregate_id = ? and published_at is null`, [w.walletId]);
+    while ((await ok.publishOnce()) > 0);
+    await drain(q.eventsUrl, 0);
+    // The head of the stream is now "failing" (scheduled in the future): nothing behind it may go out.
+    const head = (await sql(`select id from outbox_messages where aggregate_id = ? and published_at is null order by sequence limit 1`, [w.walletId]))[0]!.id;
+    await sql(`update outbox_messages set next_attempt_at = case when id = ? then now() + interval '1 hour' else now() end where aggregate_id = ? and published_at is null`, [head, w.walletId]);
+    expect(await ok.publishOnce()).toBe(0);
+    // Head becomes due → the whole stream goes out, in order.
+    await sql(`update outbox_messages set next_attempt_at = now() where id = ?`, [head]);
+    const pending = (await sql(`select count(*)::int as n from outbox_messages where aggregate_id = ? and published_at is null`, [w.walletId]))[0]!.n;
+    expect(await ok.publishOnce()).toBe(pending);
+    const got = (await drain(q.eventsUrl)).filter((m) => m.body.aggregateId === w.walletId).map((m) => Number(m.attrs.sequence));
+    expect(got).toEqual([...got].sort((a, b) => a - b));
+  }, 30_000);
 
   test('a publisher that dies after claiming loses nothing: the lease expires and another instance publishes', async () => {
     const w = await newWallet('10.00');
