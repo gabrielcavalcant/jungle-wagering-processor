@@ -11,6 +11,21 @@ Serviço financeiro que processa transações de apostas (`BET → WIN | LOSS | 
 
 ---
 
+## Ver funcionando em 1 minuto
+
+```bash
+bun install
+bun run swagger
+```
+
+Sobe PostgreSQL + LocalStack, aplica as migrations, inicia a API em `http://localhost:3000` e abre o **Swagger** (`/docs`) no navegador. Em outro terminal:
+
+```bash
+bun run demo
+```
+
+Roda os cenários do desafio contra a API e mostra cada resultado na tela: carteira, as duas apostas de 80.00 simultâneas, idempotência, 50 duplicatas em paralelo, WIN/LOSS, REFUND antes da BET, reversão que deixaria saldo negativo, validação de dinheiro, mensagem SQS duplicada, extrato, reconciliação e métricas.
+
 ## Subindo tudo
 
 Pré-requisitos: Docker (com Compose v2) e Bun ≥ 1.2.
@@ -47,6 +62,8 @@ DB_PORT=5433 PORT=3000 bun run start
 
 | comando | o que faz |
 |---|---|
+| `bun run swagger` | sobe a infra, as migrations e a API, e abre o Swagger |
+| `bun run demo` | demonstração dos cenários do desafio contra a API rodando |
 | `bun run start` | sobe uma instância |
 | `bun run migration:up` / `migration:down` | aplica / reverte migrations |
 | `bun run typecheck` | `tsc --noEmit` (modo estrito) |
