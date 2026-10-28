@@ -319,9 +319,19 @@ async function main() {
     (globalThis as any).scrollTo({ top: 0, behavior: 'smooth' });
   }, summary);
   console.log(`\n${c.bold}Resultado: ${failed ? c.red : c.green}${summary}${c.reset}`);
-  console.log(`${c.dim}O navegador continua aberto para você explorar. Feche-o (ou Ctrl+C) para encerrar.${c.reset}\n`);
-  if (process.env.TOUR_CLOSE === '1') await browser.close();
-  else await new Promise<void>((resolve) => browser.on('disconnected', () => resolve()));
+  console.log(`${c.dim}O navegador continua aberto para você explorar. Para encerrar, feche o navegador.${c.reset}\n`);
+  if (process.env.TOUR_CLOSE === '1') {
+    await browser.close();
+  } else {
+    // Ctrl+C is a normal way to stop: close the browser and exit with the tour's result, not as a crash.
+    process.on('SIGINT', async () => {
+      console.log(`\n${c.dim}Encerrando… (resultado do tour: ${summary})${c.reset}`);
+      await browser.close().catch(() => undefined);
+      process.exit(failed ? 1 : 0);
+    });
+    await new Promise<void>((resolve) => browser.on('disconnected', () => resolve()));
+    console.log(`${c.dim}Navegador fechado. Tour encerrado.${c.reset}`);
+  }
   process.exit(failed ? 1 : 0);
 }
 
