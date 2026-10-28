@@ -30,6 +30,8 @@ Isso sobe:
 curl localhost:3001/health/ready
 ```
 
+Documentação interativa da API (Swagger): **http://localhost:3001/docs**
+
 ### Rodando local (fora do Docker)
 
 ```bash
@@ -68,6 +70,7 @@ Os testes de integração e concorrência exigem `bun run infra:up`. Eles usam o
 | `GET` | `/providers/:providerId/wagering/transactions/:externalTransactionId` | consulta por id do provedor |
 | `GET` | `/health/live` · `/health/ready` | liveness · readiness (PostgreSQL + SQS) — sem autenticação |
 | `GET` | `/metrics` | métricas Prometheus |
+| `GET` | `/docs` · `/docs/openapi.json` | **Swagger UI** (documentação interativa) · contrato OpenAPI 3 |
 
 ### Códigos HTTP (iguais em todos os endpoints)
 

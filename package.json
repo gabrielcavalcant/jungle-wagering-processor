@@ -26,6 +26,7 @@
     "@nestjs/common": "11",
     "@nestjs/core": "11",
     "@nestjs/platform-express": "11",
+    "@nestjs/swagger": "11",
     "pino": "9",
     "prom-client": "15",
     "reflect-metadata": "^0.2.2",
