@@ -24,7 +24,7 @@ Isso sobe:
 | `postgres` | 5433 | banco (`wagering` para a app, `wagering_test` para os testes) |
 | `localstack` | 4566 | SQS: `wager-transactions.fifo`, `wager-transactions-dlq.fifo`, `wagering-events.fifo` |
 | `migrate` | — | roda as migrations uma vez e sai |
-| `app-1`, `app-2`, `app-3` | 3001, 3002, 3003 | **três instâncias** do mesmo serviço (HTTP + consumer SQS + outbox publisher + worker de referências) |
+| `app-1`, `app-2`, `app-3` | 3001, 3002, 3003 | **três instâncias** do mesmo serviço (HTTP + consumer SQS + outbox publisher + worker de referências + limpeza) |
 
 ```bash
 curl localhost:3001/health/ready
@@ -46,9 +46,9 @@ DB_PORT=5433 PORT=3000 bun run start
 | `bun run migration:up` / `migration:down` | aplica / reverte migrations |
 | `bun run typecheck` | `tsc --noEmit` (modo estrito) |
 | `bun run test:unit` | domínio e regras de negócio (sem I/O, ~1 s) |
-| `bun run test:integration` | PostgreSQL + LocalStack reais: constraints, atomicidade, inbox, outbox, retry, DLQ |
+| `bun run test:integration` | PostgreSQL + LocalStack reais: constraints, atomicidade, inbox, outbox ordenada, retry, DLQ + `FAILED`, retenção, locks |
 | `bun run test:concurrency` | **3 processos reais** da aplicação: 50 duplicatas em paralelo, corrida de saldo, crash após commit, kill de todas as instâncias + restart |
-| `bun run test:all` | tudo (~80 s) |
+| `bun run test:all` | tudo: 111 testes (~90 s) |
 | `bun run test:load` | teste de carga → [`test/load/RESULTS.md`](test/load/RESULTS.md) |
 
 Os testes de integração e concorrência exigem `bun run infra:up`. Eles usam o banco `wagering_test` e criam **filas próprias por execução**, então não interferem no ambiente de dev. Nenhum teste substitui PostgreSQL ou SQS por mock. Os mocks em memória (`test/support/in-memory.ts`) servem só para os testes de unidade das regras.
@@ -80,6 +80,7 @@ Os testes de integração e concorrência exigem `bun run infra:up`. Eles usam o
 | `404` | wallet ou transação inexistente | não reenviar |
 | `409` | `IDEMPOTENCY_KEY_CONFLICT`, `EXTERNAL_TRANSACTION_ID_CONFLICT`, `WALLET_ALREADY_EXISTS` | não reenviar |
 | `422` | rejeição de negócio (`status: REJECTED` + `failureCode`) | ver o `failureCode` |
+| `500` | transação `FAILED` (`PERMANENT_INFRASTRUCTURE_FAILURE`, `retryable: false`): esgotou as tentativas de infraestrutura | não reenviar com a mesma key; conciliar |
 | `503` | falha transitória de infraestrutura (`Retry-After`) | **reenviar com a mesma key** |
 
 Erros têm sempre o formato `{ "error": { "code", "message", "retryable", "details?" } }`.
@@ -108,7 +109,7 @@ Publique em `wager-transactions.fifo` (com `MessageGroupId = walletId`) o envelo
   "data": { "providerId": "provider-a", "externalTransactionId": "transaction-123", "idempotencyKey": "provider-a:transaction-123", "...": "..." } }
 ```
 
-Os eventos de integração (`WagerTransactionProcessed`, `WagerTransactionRejected`, `WalletBalanceChanged`, `WagerTransactionPendingReference`) saem em `wagering-events.fifo`.
+Os eventos de integração (`WagerTransactionProcessed`, `WagerTransactionRejected`, `WalletBalanceChanged`, `WagerTransactionPendingReference`, `WagerTransactionFailed`) saem em `wagering-events.fifo`, **na ordem do commit por wallet** (`MessageGroupId = walletId`, atributos `eventId` e `sequence`).
 
 ## Configuração
 
@@ -122,7 +123,8 @@ Todas as variáveis têm default e estão em [`src/config.ts`](src/config.ts). A
 | `SQS_MAX_RECEIVE_COUNT` | `5` | tentativas antes da DLQ (igual ao `maxReceiveCount` da redrive policy) |
 | `PENDING_REFERENCE_BASE_DELAY_MS` / `_MAX_ATTEMPTS` | `1000` / `10` | backoff exponencial das referências fora de ordem |
 | `OUTBOX_LEASE_MS` | `15000` | lease de uma linha da outbox reivindicada por um publisher |
-| `CONSUMER_ENABLED`, `OUTBOX_PUBLISHER_ENABLED`, `PENDING_REFERENCE_WORKER_ENABLED` | `true` | liga/desliga cada worker por instância |
+| `OUTBOX_RETENTION_HOURS` / `INBOX_RETENTION_HOURS` | `168` / `360` | limpeza de outbox publicada / inbox processada (inbox > 14 dias da retenção máxima do SQS) |
+| `CONSUMER_ENABLED`, `OUTBOX_PUBLISHER_ENABLED`, `PENDING_REFERENCE_WORKER_ENABLED`, `RETENTION_ENABLED` | `true` | liga/desliga cada worker por instância |
 | `FAULT_INJECTION` | — | `after-commit-before-ack` (**só para testes**: mata o processo entre o commit e o ack) |
 
 ## Estrutura

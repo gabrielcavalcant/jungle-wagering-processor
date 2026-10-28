@@ -25,6 +25,7 @@ import { logger } from '../infrastructure/observability/logger';
  * | 409    | idempotency or uniqueness conflict         | no — same key, different body   |
  * | 422    | business rejection (status REJECTED)       | same key ⇒ same answer          |
  * | 202    | accepted, waiting for reference            | yes, same key, to poll          |
+ * | 500    | transaction FAILED (retries exhausted)     | no — same key replays FAILED    |
  * | 503    | transient infrastructure failure           | yes, same key, after Retry-After|
  */
 interface ErrorBody {

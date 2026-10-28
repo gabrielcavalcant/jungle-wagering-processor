@@ -83,7 +83,7 @@ PENDING ──► PROCESSED            (terminal)
 | `REFERENCE_NOT_PROCESSED` | referência `REJECTED`/`FAILED` | não |
 | `REFERENCE_ALREADY_REVERSED` | a referência já foi revertida | não (é o resultado correto) |
 | `AMOUNT_MISMATCH` | valor ≠ valor da referência (reversão parcial fora de escopo) | não |
-| `PERMANENT_INFRASTRUCTURE_FAILURE` | reservado para `FAILED` | — |
+| `PERMANENT_INFRASTRUCTURE_FAILURE` | status `FAILED`: a mensagem esgotou as tentativas por erro de infraestrutura e foi para a DLQ | não com a mesma key (o replay devolve `FAILED`); exige conciliação/novo envio |
 
 ### Referências fora de ordem
 
@@ -132,7 +132,9 @@ PENDING ──► PROCESSED            (terminal)
 | `PROCESSED` / `REJECTED` / `PENDING_REFERENCE` / replay | **ack após o commit** |
 | JSON ou schema inválido, `VALIDATION_ERROR`, conflito de idempotência, wallet inexistente | **permanente** → DLQ na hora, com `dlqReason` |
 | `TransientInfrastructureError` (DB fora, lock timeout, deadlock) ou erro inesperado | **transitório** → `ChangeMessageVisibility` com backoff `2 s · 2^(receiveCount−1)` (teto 300 s) |
-| `ApproximateReceiveCount ≥ SQS_MAX_RECEIVE_COUNT` | DLQ (`max_receive_count`); a redrive policy da fila é o backstop para quando o processo morre antes de decidir |
+| `ApproximateReceiveCount ≥ SQS_MAX_RECEIVE_COUNT` | grava a transação como **`FAILED / PERMANENT_INFRASTRUCTURE_FAILURE`** (+ evento `WagerTransactionFailed`) e manda para a DLQ (`max_receive_count`); a redrive policy da fila é o backstop para quando o processo morre antes de decidir |
+
+**`FAILED` (`RecordPermanentFailureUseCase`):** numa transação SQL separada, trava a wallet e: transação já terminal → não mexe (ex.: o commit funcionou, mas o ack falhou); `PENDING_REFERENCE` → vira `FAILED`; inexistente → é inserida direto como `FAILED`, sem movimentar saldo e sem lançamento. Assim o provedor recebe um desfecho em vez de esperar para sempre, e um reenvio da mesma key devolve `FAILED` (nunca aplica depois). É *best effort*: se o que caiu foi o próprio banco, a gravação também falha e a mensagem na DLQ fica como trilha de auditoria.
 
 - **Inbox persistente** `(consumer_name, message_id)`: inserida com `ON CONFLICT DO NOTHING` **na mesma transação SQL** do efeito. Ela é gravada junto com o efeito ou não é gravada: um crash antes do commit não deixa inbox "processada" sem efeito.
 - Mensagens do mesmo `MessageGroupId` no batch rodam em sequência; grupos diferentes, em paralelo.
@@ -141,18 +143,27 @@ PENDING ──► PROCESSED            (terminal)
 ### Transactional Outbox
 
 - O evento é gravado em `outbox_messages` **na mesma transação** da mudança financeira. Publicação antes do commit é impossível por construção (restrição 4).
-- **Publishers concorrentes, com lease:**
-  1. statement único `WITH due AS (SELECT … FOR UPDATE SKIP LOCKED LIMIT n) UPDATE … SET locked_by, locked_until RETURNING *`;
-  2. publica **fora** de qualquer transação (nenhum lock fica preso durante I/O de rede), via `SendMessageBatch`;
-  3. marca `published_at` em lote, com a condição `locked_by = eu` (quem perdeu o lease não sobrescreve).
+- **Publishers concorrentes, com lease e ordem por wallet:**
+  1. statement único: para cada wallet, olha a **cabeça** do seu fluxo não publicado (menor `sequence`). A wallet só é reivindicada se a cabeça está vencida e sem lease **e** se o statement ganha `pg_try_advisory_xact_lock(wallet)`. Assim dois publishers nunca pegam eventos da mesma wallet ao mesmo tempo, mas wallets diferentes são publicadas em paralelo. As linhas recebem `locked_by` e `locked_until`;
+  2. publica **fora** de qualquer transação (nenhum lock fica preso durante I/O de rede), via `SendMessageBatch`, wallet a wallet em ordem de `sequence`;
+  3. marca `published_at` em lote, com a condição `locked_by = eu` (quem perdeu o lease não sobrescreve). Se um evento falha, ele recebe backoff e **trava o resto do fluxo daquela wallet** até sair: os eventos de uma wallet chegam na fila na ordem do commit. Cada mensagem leva o atributo `sequence`.
 - **Cenário do enunciado:** commit → processo morre antes de publicar → o lease expira (`OUTBOX_LEASE_MS`) → outra instância reivindica e publica. Testado em `messaging.test.ts` e no teste 8 de concorrência.
 - **Entrega at-least-once**, segura para o consumidor: `eventId` = id da linha (estável entre republicações), enviado como `MessageDeduplicationId` (dedup de 5 min da FIFO) e no corpo, para o consumidor deduplicar. `WalletBalanceChanged` traz `walletVersion`, que dá ordem total por wallet.
 - Falha de publicação → `attempts++`, `next_attempt_at` com backoff exponencial + jitter, `last_error`.
 - O conteúdo do evento é imutável no banco (trigger `outbox_guard_update`).
 
+### Retenção (limpeza)
+
+Job periódico em todas as instâncias (`RetentionStore`), com deleção em lotes e `FOR UPDATE SKIP LOCKED` (instâncias concorrentes nunca apagam a mesma linha duas vezes):
+- `outbox_messages` **já publicadas** há mais de `OUTBOX_RETENTION_HOURS` (padrão 7 dias). As pendentes nunca são apagadas;
+- `inbox_messages` **já processadas** há mais de `INBOX_RETENTION_HOURS` (padrão **15 dias**). Esse valor precisa ser maior que a retenção máxima do SQS (14 dias): se a linha de dedup sumisse antes, uma redelivery atrasada poderia ser aplicada de novo;
+- ledger, transações e wallets **nunca** são apagados: são a trilha de auditoria (e o banco recusa).
+
 ## 7. Schema (o que o PostgreSQL garante)
 
-Migration: `src/infrastructure/persistence/migrations/Migration20261028000001_initial_schema.ts` (com `down()`, testada indo a zero e voltando).
+Migrations (em `src/infrastructure/persistence/migrations/`, todas com `down()`, testadas indo a zero e voltando):
+- `Migration20261028000001_initial_schema`: tabelas, constraints e triggers abaixo;
+- `Migration20261028000002_ordering_retention_result_currency`: coluna `result_currency` (com backfill e `CHECK` de que ela existe se e só se `result_balance` existe), índice `(aggregate_id, sequence)` das cabeças da outbox e índices parciais para a retenção.
 
 | garantia | mecanismo |
 |---|---|
@@ -177,13 +188,14 @@ Migration: `src/infrastructure/persistence/migrations/Migration20261028000001_in
 
 ## 8. Persistência: por que MikroORM, e como
 
-- **MikroORM** (preferência do enunciado) cuida de: pool de conexões, **Unit of Work transacional** (`em.fork().transactional()` com `IsolationLevel.READ_COMMITTED`) e **migrations versionadas e reversíveis** (lista explícita, sem glob, para funcionar igual em Bun, Docker e testes).
-- **Os repositórios usam SQL explícito via `em.execute()` dentro da transação do MikroORM**, sem entidades gerenciadas. É uma escolha consciente:
-  - os caminhos críticos são exatamente o que um ORM esconde: `FOR UPDATE [SKIP LOCKED]`, `UPDATE … WHERE version = ?` com checagem de linhas afetadas, `INSERT … ON CONFLICT DO NOTHING RETURNING`, CTE de claim da outbox. Em SQL eles ficam auditáveis linha a linha;
-  - o *change tracking* do Identity Map, num agregado financeiro, faz flush implícito no fim da transação, com ordem decidida pelo ORM. Aqui a ordem importa (transação → wallet → ledger, por causa das FKs e dos triggers) e cada escrita é explícita;
-  - o domínio continua 100% livre de decorators e tipos do ORM. O mapeamento linha ↔ agregado fica em `repositories.ts` (factories `rehydrate`).
-- **Mapeamento do `Money`:** duas colunas, `amount numeric(20,2)` e `currency char(3)`. Na leitura, `Money.parse({amount: string, currency})`. Na escrita, `money.amount` (string). O `numeric` do PostgreSQL é decimal exato e o driver nunca converte para `number`.
-- **Trade-off:** perde-se o Identity Map e o `LockMode` declarativo. Com mais tempo eu mapearia `EntitySchema`s para as leituras (queries de consulta) e manteria SQL explícito só nos writes críticos.
+- **MikroORM** (preferência do enunciado) cuida de: pool de conexões, **Unit of Work transacional** (`em.fork().transactional()` com `IsolationLevel.READ_COMMITTED`, um fork novo por operação, sem Identity Map compartilhado), **migrations versionadas e reversíveis** (lista explícita, sem glob, para funcionar igual em Bun, Docker e testes) e **leituras + locks via `EntitySchema`** (`src/infrastructure/persistence/entities.ts`).
+- **Lock pela API do ORM:** `em.findOne(WalletRecord, { id }, { lockMode: LockMode.PESSIMISTIC_WRITE })` gera o `SELECT … FOR UPDATE`. No worker de referências, `LockMode.PESSIMISTIC_PARTIAL_WRITE` gera o `FOR UPDATE SKIP LOCKED`. Um teste de integração prova os dois comportamentos (bloqueia / pula).
+- **Leituras** (`findOne`, `find`, `count`) usam as entidades com `disableIdentityMap: true`. Dentro de uma transação a mesma linha é lida antes e depois do lock da wallet, e a segunda leitura precisa ver o último commit, não a cópia em cache do Identity Map.
+- **Escritas críticas continuam em SQL explícito** (`em.execute()` dentro da mesma transação do MikroORM): `UPDATE … WHERE version = ?` com checagem de linhas afetadas, `INSERT … ON CONFLICT DO NOTHING RETURNING`, CTE de claim da outbox com advisory lock. Motivos:
+  - são exatamente os detalhes que o ORM esconderia, e aqui eles precisam ficar auditáveis linha a linha;
+  - o flush implícito do Unit of Work decide a ordem das escritas, mas aqui a ordem importa (transação → wallet → ledger, por causa das FKs e dos constraint triggers);
+  - o domínio continua 100% livre de decorators e tipos do ORM. As entidades são *registros de persistência*, e o mapeamento registro ↔ agregado fica em `repositories.ts` (factories `rehydrate`).
+- **Mapeamento do `Money`:** duas colunas, `amount numeric(20,2)` (propriedade `decimal` → **string** no JS) e `currency char(3)`. Na leitura, `Money.parse({amount, currency})`. Na escrita, `money.amount` (string). Nenhum `number` participa. O saldo observado de uma transação tem a própria moeda (`result_currency`), porque numa rejeição por `CURRENCY_MISMATCH` ela difere da moeda da operação.
 
 ## 9. Observabilidade
 
@@ -208,12 +220,12 @@ Migration: `src/infrastructure/persistence/migrations/Migration20261028000001_in
 | nível | onde | o que prova |
 |---|---|---|
 | unidade (73) | `test/unit` | `Money` (escala, inválidos, arredondamento nunca silencioso), invariantes da `Wallet`, todas as regras por kind, conflito de moeda, payload divergente, máquina de estados, hash canônico |
-| integração (23) | `test/integration` | migrations up/down; **cada constraint do schema testada com SQL direto**; atomicidade (falha na outbox desfaz tx + wallet + ledger + inbox); inbox + redelivery; crash antes do ack; DLQ permanente; retry + DLQ por `maxReceiveCount`; 2 publishers concorrentes; lease expirada; publicação com falha |
+| integração (29) | `test/integration` | migrations up/down; **cada constraint do schema testada com SQL direto**; atomicidade (falha na outbox desfaz tx + wallet + ledger + inbox); inbox + redelivery; crash antes do ack; DLQ permanente; retry + DLQ por `maxReceiveCount` com transação `FAILED`; 3 publishers concorrentes **mantendo a ordem por wallet**; cabeça com falha bloqueando o resto do fluxo; lease expirada; publicação com falha; retenção (só apaga o que pode, em lotes, concorrente); `LockMode` bloqueando / pulando |
 | concorrência (9) | `test/concurrency` | **3 processos reais**: 50 duplicatas → 1 débito; 100/80/80 ×10; 20 wallets em paralelo; carga mista HTTP+SQS em wallets quentes; outbox com 3 publishers; REFUND/ROLLBACK antes da referência (HTTP e SQS); referência que nunca chega; **processo morto entre o commit e o ack** (`FAULT_INJECTION`, exit 137); **SIGKILL nas 3 instâncias no meio da carga + restart** |
 
 Todos terminam verificando `wallet.balance == Σ ledger` (+ encadeamento, + nenhuma entrada duplicada).
 
-**Carga** (`bun run test:load`, resultado em [`test/load/RESULTS.md`](test/load/RESULTS.md)). Num notebook i7-4500U (2C/4T) com cliente, 3 instâncias, PostgreSQL e LocalStack disputando a mesma CPU, 64 clientes e 30% do tráfego numa única wallet quente: **~70 req/s, 0% de erro, p50 ≈ 0,2 s, p99 ≈ 9 s, reconciliação consistente em todas as wallets, outbox esvaziando em ~0,1 s após a carga.** A cauda é dominada pela fila de lock da wallet quente, que é o custo esperado do lock pessimista. Os números absolutos são um piso por causa do hardware; o resultado relevante é zero erro e zero divergência sob contenção. Uma otimização encontrada pelo próprio teste: marcar os eventos publicados em lote derrubou o tempo para esvaziar a outbox de 22,9 s para 0,1 s.
+**Carga** (`bun run test:load`, resultado em [`test/load/RESULTS.md`](test/load/RESULTS.md)). Num notebook i7-4500U (2C/4T) com cliente, 3 instâncias, PostgreSQL e LocalStack disputando a mesma CPU, 64 clientes e 30% do tráfego numa única wallet quente: **55–74 req/s entre rodadas, 0% de erro, p50 ≈ 0,2–0,3 s, p99 ≈ 9–12 s, reconciliação consistente em todas as wallets, outbox esvaziando em ~0,1 s após a carga.** A rodada mais recente (com leituras via entidades MikroORM) ficou no limite inferior: o ORM adiciona um pouco de custo de hidratação por leitura, e a máquina é compartilhada com o banco e o cliente de carga. A cauda é dominada pela fila de lock da wallet quente, que é o custo esperado do lock pessimista. Os números absolutos são um piso por causa do hardware; o resultado relevante é zero erro e zero divergência sob contenção. Uma otimização encontrada pelo próprio teste: marcar os eventos publicados em lote derrubou o tempo para esvaziar a outbox de 22,9 s para 0,1 s.
 
 ## 11. Autenticação (não implementada, por decisão)
 
@@ -227,11 +239,9 @@ O enunciado dá zero pontos para auth e pede que ela não compita com o núcleo.
 
 ## 12. Limitações conhecidas e próximos passos
 
-1. **`FAILED` é reservado e não é produzido hoje.** Erros de infraestrutura são transitórios (retry) ou levam a mensagem para a DLQ, sem tocar o ledger. Próximo passo: ao mandar para a DLQ por `max_receive_count`, gravar a transação como `FAILED / PERMANENT_INFRASTRUCTURE_FAILURE` numa transação separada, para auditoria.
-2. **Ordem de eventos entre publishers concorrentes:** dois publishers podem publicar eventos da mesma wallet fora de ordem. O consumidor ordena por `walletVersion`. Alternativa mais forte: o claim pegar só o evento mais antigo não publicado de cada `aggregate_id`.
-3. **Wallet quente:** o throughput de uma única wallet é limitado por 1/(tempo de lock). Mitigações possíveis: lock mais curto (pré-validação fora do lock), ou partições de saldo/reservas para jogadores de altíssimo volume.
-4. **Retenção:** `inbox_messages` e `outbox_messages` publicadas crescem para sempre. Faltam um job de limpeza (por exemplo, inbox > 14 dias, que é o retention máximo do SQS) e o particionamento do ledger por tempo.
-5. **Ledger de partidas dobradas** (diferencial opcional) não foi feito: hoje é um razão por wallet com saldo encadeado. O próximo passo seria contas de contrapartida por provedor/jogo.
-6. Os repositórios usam SQL explícito em vez de entidades MikroORM (§8, trade-off consciente).
-7. **LocalStack fixado em 4.4**, porque as versões mais novas exigem auth token. O MiniStack é uma alternativa compatível.
-8. Sem OpenTelemetry/tracing distribuído. O `correlationId` atravessa HTTP → outbox → eventos, mas não SQS de entrada → spans.
+1. **Wallet quente:** o throughput de uma única wallet é limitado por 1/(tempo de lock). Mitigações possíveis: lock mais curto (pré-validação fora do lock), ou partições de saldo/reservas para jogadores de altíssimo volume.
+2. **Ordem dos eventos, caso de borda:** se, num mesmo `SendMessageBatch`, um evento falha e um posterior da mesma wallet é aceito, o posterior já saiu (não dá para "desenviar"). O consumidor ainda consegue reordenar pelo atributo `sequence` / `walletVersion`. Para eliminar o caso, bastaria enviar um evento por vez por wallet, ao custo de throughput.
+3. **`FAILED` é best effort:** se o banco está fora, a transação não pode ser gravada como `FAILED` e só a mensagem na DLQ registra o ocorrido. Um job de redrive da DLQ poderia gravar o `FAILED` quando o banco voltar.
+4. **Ledger de partidas dobradas** (diferencial opcional) não foi feito: hoje é um razão por wallet com saldo encadeado. O próximo passo seria contas de contrapartida por provedor/jogo. Também falta particionar o ledger por tempo para volumes grandes.
+5. **LocalStack fixado em 4.4**, porque as versões mais novas exigem auth token. O MiniStack é uma alternativa compatível.
+6. Sem OpenTelemetry/tracing distribuído. O `correlationId` atravessa HTTP → outbox → eventos, mas não SQS de entrada → spans.
