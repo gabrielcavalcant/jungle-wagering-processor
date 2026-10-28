@@ -4,6 +4,7 @@
   "private": true,
   "description": "Distributed wagering processor — Jungle Gaming backend challenge",
   "scripts": {
+    "tudo": "bun run scripts/tudo.ts",
     "swagger": "bun run scripts/swagger.ts",
     "demo": "bun run scripts/demo.ts",
     "start": "bun run src/main.ts",
